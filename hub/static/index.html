@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>Hermes Mission Control</title>
+  <link rel="icon" href="/static/icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/static/style.css">
+  <script type="module" src="/static/app.js"></script>
+</head>
+<body>
+  <header class="top">
+    <div class="brand">
+      <img src="/static/icon.svg" alt="" width="22" height="22">
+      <h1>Hermes Mission Control</h1>
+    </div>
+    <div class="top-status" id="top-status"></div>
+    <div class="top-actions">
+      <label class="source-pick" id="source-pick" hidden>
+        <span class="visually-hidden">Agent source</span>
+        <select id="source-select"></select>
+      </label>
+      <a id="garage-link" class="link-btn" hidden target="_blank" rel="noopener">Machine health ↗</a>
+      <button id="logout" class="link-btn" hidden type="button">Log out</button>
+    </div>
+  </header>
+  <nav class="tabs" id="tabs" role="tablist" aria-label="Dashboard sections"></nav>
+  <main id="main">
+    <div class="empty" id="loading">Loading…</div>
+  </main>
+  <form id="login" class="login" hidden>
+    <h2>Hermes Mission Control</h2>
+    <label>Password <input type="password" id="password" autocomplete="current-password" required></label>
+    <button type="submit">Open dashboard</button>
+    <p class="error" id="login-error" hidden></p>
+  </form>
+  <footer class="foot" id="foot"></footer>
+</body>
+</html>
