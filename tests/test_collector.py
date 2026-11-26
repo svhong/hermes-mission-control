@@ -104,11 +104,77 @@ class CollectorTest(unittest.TestCase):
                 db.conn.execute("DELETE FROM sessions")
 
 
+class LinkingTest(unittest.TestCase):
+    """Hand-built cases mirroring what a real hermes-box database contains."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.path = os.path.join(self.tmp.name, "state.db")
+        conn = sqlite3.connect(self.path)
+        with open(fake_hermes.SCHEMA) as f:
+            conn.executescript(f.read())
+        self.conn = conn
+        self.now = __import__("time").time()
+
+    def tearDown(self):
+        self.conn.close()
+        self.tmp.cleanup()
+
+    def session(self, sid, source="telegram", parent=None, started=0, ended=None, end_reason=None,
+                title=None, delegate=False, tool_names=None):
+        cfg = json.dumps({"_delegate_from": parent}) if delegate else "{}"
+        self.conn.execute(
+            "INSERT INTO sessions (id, source, model, model_config, parent_session_id, started_at, ended_at, "
+            "end_reason, title, last_activity_at, tool_names) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            (sid, source, "m", cfg, parent, self.now - started, ended and self.now - ended, end_reason, title,
+             self.now - (ended or 0), tool_names))
+
+    def tree(self):
+        self.conn.commit()
+        return Collector(self.path, "t", True).report(force=True)["data"]["agents"]["tree"]["conversations"]
+
+    def test_session_reset_starts_a_new_conversation(self):
+        self.session("old", started=9000, ended=5000, end_reason="session_reset", title="Old chat")
+        self.session("new", parent="old", started=5000, title="New chat")
+        self.session("sub", source="subagent", parent="new", started=100, ended=50, end_reason="agent_close",
+                     delegate=True)
+        convs = self.tree()
+        self.assertEqual([c["id"] for c in convs], ["new"])
+        self.assertEqual(convs[0]["title"], "New chat")
+        self.assertEqual(convs[0]["continuations"], 0)
+
+    def test_compression_continuation_is_folded(self):
+        self.session("first", started=9000, ended=5000, end_reason="context_compression", title="Long chat")
+        self.session("second", parent="first", started=5000)
+        self.session("sub", source="subagent", parent="second", started=100, ended=50, delegate=True)
+        convs = self.tree()
+        self.assertEqual([c["id"] for c in convs], ["first"])
+        self.assertEqual(convs[0]["continuations"], 1)
+
+    def test_subagent_goal_matched_by_timing(self):
+        self.session("chat", started=9000)
+        # Two subagents started 20 ms apart; records tell them apart by when they finished.
+        self.session("a", source="subagent", parent="chat", started=300.00, ended=100, delegate=True,
+                     title="Subagent: CONTEXT: #6", tool_names="67b07f7ac485d7bdde8780b46861f2f9c5a3ddb9db0232bd")
+        self.session("b", source="subagent", parent="chat", started=299.98, ended=150, delegate=True,
+                     title="Subagent: CONTEXT: #7")
+        for rid, created, updated, goal in (("sa-0", 299.95, 100.01, "Goal A"), ("sa-1", 299.94, 150.01, "Goal B")):
+            self.conn.execute("INSERT INTO resumable_subagents VALUES (?,?,?,?,?,?,?,?,?,?)",
+                              (rid, "completed", 0, None, None, None, json.dumps({"goal": goal}),
+                               self.now - created, self.now - updated, None))
+        subs = {s["id"]: s for s in self.tree()[0]["children"]}
+        self.assertEqual(subs["a"]["goal"], "Goal A")
+        self.assertEqual(subs["b"]["goal"], "Goal B")
+        self.assertEqual(subs["a"]["title"], "Goal A")  # generic title replaced
+        self.assertEqual(subs["a"]["tool_names"], [])   # a hash, not tool names
+
+
 class HelpersTest(unittest.TestCase):
     def test_parse_list(self):
         self.assertEqual(parse_list('["a", "b", "a"]'), ["a", "b"])
         self.assertEqual(parse_list("x, y"), ["x", "y"])
         self.assertEqual(parse_list(None), [])
+        self.assertEqual(parse_list("67b07f7ac485d7bdde8780b46861f2f9c5a3ddb9db0232bdd469b20c4edc"), [])
 
     def test_pick_text_truncates_and_ignores_other_keys(self):
         self.assertEqual(pick_text('{"goal": "short"}'), "short")

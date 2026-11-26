@@ -11,7 +11,7 @@ context is shown once: continuation sessions are folded into the original.
 import json
 import re
 
-from hermes_db import parse_list, pick_text
+from hermes_db import json_strings, parse_list, pick_text
 from tabs import section
 from tabs.overview import ACTIVE_S, HEARTBEAT_STALE_S, SUB_ACTIVE_S, activity_sql, cost_sql
 
@@ -23,6 +23,12 @@ PROFILE_WINDOW_S = 7 * 86400
 MAX_SUBAGENTS = 400
 MAX_CONVERSATIONS = 30
 FAILED = re.compile(r"error|fail|crash|abort|timeout|timed.out|exception", re.I)
+# A session that ended like this was continued in a new session (same conversation).
+# Anything else with a parent, e.g. "session_reset", is a new conversation.
+CONTINUED = re.compile(r"compress|compact|continu|rollover|context", re.I)
+# Titles Hermes gives subagents that say nothing about the task.
+GENERIC_TITLE = re.compile(r"^\s*subagent\b[:\s]*(context[:\s]*)?#?\d*\s*$", re.I)
+MATCH_WINDOW_S = 10
 
 
 def collect(db, ctx):
@@ -140,7 +146,8 @@ def tree(db, ctx):
         """Follow compression continuations back to the original conversation."""
         n = nodes[nid]
         seen = set()
-        while not n["is_sub"] and n["parent_id"] in nodes and not nodes[n["parent_id"]]["is_sub"] and n["id"] not in seen:
+        while (not n["is_sub"] and n["parent_id"] in nodes and not nodes[n["parent_id"]]["is_sub"]
+               and CONTINUED.search(nodes[n["parent_id"]]["end_reason"] or "") and n["id"] not in seen):
             seen.add(n["id"])
             n = nodes[n["parent_id"]]
         return n["id"]
@@ -151,6 +158,7 @@ def tree(db, ctx):
         if not n["is_sub"]:
             convs.setdefault(root_of(nid), []).append(n)
 
+    goals = subagent_goals(db, ctx, nodes)
     out_nodes = {}
 
     def to_out(n, kind):
@@ -163,7 +171,10 @@ def tree(db, ctx):
             "tokens_in": n["tokens_in"], "tokens_out": n["tokens_out"], "cost": round(n["cost"] or 0, 4),
             "tool_names": parse_list(n["tool_names"]), "worker": workers.get(n["id"]),
             "status": _status(n, workers.get(n["id"]), ctx), "children": [],
+            "goal": ctx.text(goals.get(n["id"]), 160),
         }
+        if o["goal"] and (not o["title"] or GENERIC_TITLE.match(o["title"])):
+            o["title"] = ctx.text(o["goal"], 80)
         if o["ended_at"]:
             o["duration_s"] = round(o["ended_at"] - o["started_at"])
         else:
@@ -226,6 +237,45 @@ def tree(db, ctx):
         finish(r)
     roots.sort(key=lambda r: (r["subtree"]["running"] > 0, r["subtree"]["last_activity_at"]), reverse=True)
     return {"conversations": roots[:MAX_CONVERSATIONS], "total_conversations": len(roots)}
+
+
+def subagent_goals(db, ctx, nodes):
+    """Subagent session id -> its task, taken from resumable_subagents.
+
+    A record is linked to a session if it mentions the session id; otherwise
+    by timing: Hermes creates the record within milliseconds of starting the
+    session and updates it as the session ends.
+    """
+    if not db.has("resumable_subagents", "record_json", "created_at", "updated_at"):
+        return {}
+    subs = {i: n for i, n in nodes.items() if n["is_sub"]}
+    if not subs:
+        return {}
+    oldest = min(n["started_at"] for n in subs.values()) - MATCH_WINDOW_S
+    goals, pairs = {}, []
+    for r in db.rows("SELECT subagent_id, created_at, updated_at, record_json FROM resumable_subagents "
+                     "WHERE created_at >= ?", (oldest,)):
+        goal = pick_text(r["record_json"], ("goal", "task", "name", "title", "description"), 200)
+        if not goal:
+            continue
+        refs = json_strings(r["record_json"]) & subs.keys()
+        if refs:
+            for i in refs:
+                goals.setdefault(i, goal)
+            continue
+        for i, n in subs.items():
+            start_gap = abs(n["started_at"] - r["created_at"])
+            if start_gap > MATCH_WINDOW_S:
+                continue
+            end_gap = abs(n["ended_at"] - r["updated_at"]) if n["ended_at"] else 0
+            pairs.append((start_gap + min(end_gap, 60), r["subagent_id"], i, goal))
+    used = set()
+    for _, rid, sid, goal in sorted(pairs):
+        if rid in used or sid in goals:
+            continue
+        used.add(rid)
+        goals[sid] = goal
+    return goals
 
 
 def _status(n, worker, ctx):

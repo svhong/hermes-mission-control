@@ -4,7 +4,15 @@ import { el, card, table, pill, statePill, money, num, ago, duration, clock, sho
 // Kept across re-renders (the page refreshes every few seconds).
 // Conversations that are working start expanded, finished ones collapsed;
 // clicking flips that default for the conversation.
-const ui = { filter: 'all', open: new Set(), flipped: new Set() };
+const ui = { filter: 'all', open: new Set(), flipped: new Set(), showAll: new Set() };
+const SHORT_LIST = 8;
+
+// Long tables show the latest few, with a button for the rest.
+function limited(id, rows, rerender) {
+  if (rows.length <= SHORT_LIST || ui.showAll.has(id)) return { rows, more: null };
+  const more = el('button', { type: 'button', class: 'link-btn more', onclick: () => { ui.showAll.add(id); rerender(); }, text: `Show all ${rows.length}` });
+  return { rows: rows.slice(0, SHORT_LIST), more };
+}
 
 export function render(root, ctx) {
   const { data } = ctx;
@@ -12,8 +20,8 @@ export function render(root, ctx) {
     profilesRow(data.profiles, ctx.now),
     treeCard(data.tree, data.window_h, ctx),
     el('div', { class: 'grid two' },
-      delegationsCard(data.delegations, ctx.now),
-      resumableCard(data.resumable, ctx.now)),
+      delegationsCard(data.delegations, ctx),
+      resumableCard(data.resumable, ctx)),
   );
 }
 
@@ -25,7 +33,7 @@ function profilesRow(profiles, now) {
     el('div', { class: 'profile-head' },
       el('span', { class: 'strong', text: p.profile }),
       p.gateway_alive === true ? pill('alive', 'Gateway up') : p.gateway_alive === false ? pill('stale', 'Gateway down') : null),
-    el('div', { class: 'muted small', text: `${num(p.conversations)} conversations · ${num(p.subagents)} subagents · ${money(p.cost)} · 7 days` }),
+    el('div', { class: 'muted small', text: `${num(p.conversations)} conversations · ${num(p.subagents)} subagents${p.cost > 0 ? ' · ' + money(p.cost) : ''} · 7 days` }),
     el('div', { class: 'muted small', text: `last active ${ago(p.last_activity_at, now)}` }))));
 }
 
@@ -63,7 +71,7 @@ function conversation(c, ctx) {
     el('span', { class: 'muted small', text: [c.source, c.profile !== 'default' ? c.profile : null, c.model, c.continuations ? `continued ${c.continuations}×` : null].filter(Boolean).join(' · ') })),
   el('span', { class: 'conv-stats small' },
     el('span', { text: `${st.subagents} subagent${st.subagents === 1 ? '' : 's'}${st.running ? ` · ${st.running} working` : ''}` }),
-    el('span', { class: 'muted', text: `${num((c.tokens_in || 0) + (c.tokens_out || 0) + st.tokens)} tok · ${money((c.cost || 0) + st.cost)} · ${ago(st.last_activity_at, ctx.now)}` })));
+    el('span', { class: 'muted', text: `${num((c.tokens_in || 0) + (c.tokens_out || 0) + st.tokens)} tok${(c.cost || 0) + st.cost > 0 ? ' · ' + money((c.cost || 0) + st.cost) : ''} · ${ago(st.last_activity_at, ctx.now)}` })));
   const wrap = el('div', { class: 'conv' + (st.running ? ' has-running' : '') }, head);
   if (!collapsed) {
     if (c.activity && (c.status === 'active' || c.status === 'running')) wrap.append(el('div', { class: 'conv-activity muted small', text: '↳ ' + c.activity }));
@@ -85,7 +93,7 @@ function subagent(s, depth, ctx) {
     el('span', { class: 'muted small', text: [s.model, s.status === 'running' || s.status === 'active' ? s.activity : s.end_reason].filter(Boolean).join(' · ') })),
   el('span', { class: 'sub-nums small' },
     el('span', { text: duration(s.duration_s) }),
-    el('span', { class: 'muted', text: `${num(s.tool_calls)} tools · ${num(s.tokens_in + s.tokens_out)} tok · ${money(s.cost)}` })));
+    el('span', { class: 'muted', text: `${num(s.tool_calls)} tools · ${num(s.tokens_in + s.tokens_out)} tok${s.cost > 0 ? ' · ' + money(s.cost) : ''}` })));
   const item = el('div', { class: 'sub', role: 'listitem' }, row);
   item.style.setProperty('--depth', depth);
   if (open) item.append(details(s, ctx));
@@ -95,6 +103,7 @@ function subagent(s, depth, ctx) {
 
 function details(s, ctx) {
   const rows = [
+    ...(s.goal ? [['Goal', s.goal]] : []),
     ['Session', s.id],
     ['Started', `${clock(s.started_at)} (${ago(s.started_at, ctx.now)})`],
     ['Ended', s.ended_at ? `${clock(s.ended_at)} · ${s.end_reason || 'no reason recorded'}` : 'still open'],
@@ -103,34 +112,36 @@ function details(s, ctx) {
     ['Model', s.model || '–'],
     ['Messages / API calls', `${num(s.messages)} / ${num(s.api_calls)}`],
     ['Tokens in / out', `${num(s.tokens_in)} / ${num(s.tokens_out)}`],
-    ['Cost', money(s.cost)],
-    ['Tools available', s.tool_names.length ? s.tool_names.join(', ') : '–'],
+    ...(s.cost > 0 ? [['Cost', money(s.cost)]] : []),
+    ...(s.tool_names.length ? [['Tools available', s.tool_names.join(', ')]] : []),
   ];
   return el('dl', { class: 'details' }, rows.map(([k, v]) => [el('dt', { text: k }), el('dd', { text: v })]));
 }
 
-function delegationsCard(rows, now) {
-  const err = sectionError(rows);
+function delegationsCard(all, { now, rerender }) {
+  const err = sectionError(all);
   if (err) return card('Background delegations', err);
-  if (!rows.length) return card('Background delegations', empty('None in this window'));
-  return card('Background delegations', table([
+  if (!all.length) return card('Background delegations', empty('None in this window'));
+  const { rows, more } = limited('delegations', all, rerender);
+  return card('Background delegations', el('div', {}, table([
     { label: 'State', cell: r => statePill(r.state) },
     { label: 'Task', class: 'grow', cell: r => el('div', {}, el('div', { text: r.goal || shortId(r.id) }),
       el('div', { class: 'muted small', text: `result ${r.delivery_state || '–'}${r.delivery_attempts > 1 ? ` after ${r.delivery_attempts} tries` : ''}` })) },
     { label: 'Took', class: 'num', cell: r => duration(r.duration_s) },
     { label: 'Started', class: 'num', cell: r => ago(r.dispatched_at, now) },
-  ], rows), { note: 'tasks handed off to run asynchronously' });
+  ], rows), more), { note: 'tasks handed off to run asynchronously' });
 }
 
-function resumableCard(rows, now) {
-  const err = sectionError(rows);
+function resumableCard(all, { now, rerender }) {
+  const err = sectionError(all);
   if (err) return card('Resumable subagents', err);
-  if (!rows.length) return card('Resumable subagents', empty('None'));
-  return card('Resumable subagents', table([
+  if (!all.length) return card('Resumable subagents', empty('None'));
+  const { rows, more } = limited('resumable', all, rerender);
+  return card('Resumable subagents', el('div', {}, table([
     { label: 'State', cell: r => statePill(r.state) },
     { label: 'Subagent', class: 'grow', cell: r => el('div', {}, el('div', { text: (r.name || shortId(r.id)) + (r.pinned ? ' 📌' : '') }),
       r.stop_cause ? el('div', { class: 'muted small', text: `stopped: ${r.stop_cause}` }) : null) },
     { label: 'Updated', class: 'num', cell: r => ago(r.updated_at, now) },
     { label: 'Expires', class: 'num', cell: r => r.expires_at ? (r.expires_at > now ? 'in ' + duration(r.expires_at - now) : 'expired') : '–' },
-  ], rows), { note: 'can be paused and picked up later' });
+  ], rows), more), { note: 'can be paused and picked up later' });
 }

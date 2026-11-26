@@ -132,11 +132,19 @@ class Fake:
                 e = s + random.uniform(20, 600)
                 if ended:
                     e = min(e, ended)
-                reason = "error: tool budget exceeded" if random.random() < 0.08 else "completed"
+                reason = "error: tool budget exceeded" if random.random() < 0.08 else "agent_close"
                 act = e
+            self.sub_count = getattr(self, "sub_count", 0) + 1
             sid = self.session(s, "subagent", pick(SUB_MODELS), parent=parent, delegate_from=parent,
-                               ended=e, end_reason=reason, title=None, activity_at=act,
-                               n_messages=random.randint(4, 14), profile=None)
+                               ended=e, end_reason=reason, title="Subagent: CONTEXT: #%d" % self.sub_count,
+                               activity_at=act, n_messages=random.randint(4, 14), profile=None)
+            # Like real Hermes: the record doesn't name the session; it's created
+            # just after the session starts and updated as it ends.
+            self.db.execute(
+                "INSERT INTO resumable_subagents VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (new_id("sa"), "running" if running else "completed", 0, None, None, None,
+                 json.dumps({"goal": random.choice(GOALS), "history": "History " + PRIVATE_MARKER}),
+                 s + 0.05, (e or s) + 0.01, (e or s) + 172800))
             if running:
                 self.worker(sid, "child", "running")
             if depth == 0 and random.random() < 0.15:
@@ -176,6 +184,11 @@ class Fake:
             sid2 = self.session(ended, source, pick(MODELS), parent=sid, profile=profile,
                                 ended=ended + 900, end_reason="user_exit", activity_at=ended + 900, n_messages=10)
             self.subagents(sid2, ended, ended + 900)
+        elif not active and random.random() < 0.1:  # user started over: a new conversation
+            self.db.execute("UPDATE sessions SET end_reason = 'session_reset' WHERE id = ?", (sid,))
+            sid2 = self.session(ended, source, pick(MODELS), parent=sid, profile=profile, title=random.choice(TITLES),
+                                ended=ended + 600, end_reason="user_exit", activity_at=ended + 600, n_messages=8)
+            self.subagents(sid2, ended, ended + 600)
         if random.random() < 0.35 or active:
             self.subagents(sid, started, ended, running=active)
         if source == "cron":
@@ -220,7 +233,7 @@ class Fake:
             self.db.execute("INSERT OR REPLACE INTO gateway_heartbeats VALUES ('gw-main', 4242, ?, ?, '', 'hermes-box')",
                             (started, now))
         else:
-            self.db.execute("UPDATE gateway_heartbeats SET last_heartbeat = ?", (now,))
+            self.db.execute("UPDATE gateway_heartbeats SET last_heartbeat = ? WHERE backend_id = 'gw-main'", (now,))
 
     def tick(self):
         """One step of --live: keep things moving."""
@@ -243,9 +256,11 @@ class Fake:
         for sid, started in self.db.execute(
                 "SELECT id, started_at FROM sessions WHERE source = 'subagent' AND ended_at IS NULL").fetchall():
             if now - started > random.uniform(40, 240):
-                reason = "error: model timeout" if random.random() < 0.1 else "completed"
+                reason = "error: model timeout" if random.random() < 0.1 else "agent_close"
                 self.db.execute("UPDATE sessions SET ended_at = ?, end_reason = ?, last_activity_at = ? WHERE id = ?",
                                 (now, reason, now, sid))
+                self.db.execute("UPDATE resumable_subagents SET state = 'completed', updated_at = ? "
+                                "WHERE state = 'running' AND abs(created_at - ?) < 1", (now, started))
                 self.db.execute("UPDATE worker_executions SET status = 'terminal' WHERE session_id = ?", (sid,))
             elif random.random() < 0.4:
                 self.messages(sid, now, now, 1)

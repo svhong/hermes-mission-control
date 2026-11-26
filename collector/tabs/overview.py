@@ -10,7 +10,8 @@ DAYS = 14             # length of the daily charts
 WINDOW_DAYS = 7       # window for the model / platform / tool breakdowns
 ACTIVE_S = 600        # a conversation counts as active if it did something in the last 10 min
 SUB_ACTIVE_S = 120    # same for subagents, which work in short bursts
-HEARTBEAT_STALE_S = 120
+HEARTBEAT_STALE_S = 180   # Hermes writes a heartbeat about once a minute
+OLD_GATEWAY_S = 3600      # hide dead gateway entries older than this when another one is alive
 
 
 def collect(db, ctx):
@@ -33,6 +34,10 @@ def cost_sql(db, a="s"):
     actual = db.col("sessions", "actual_cost_usd", a)
     est = db.col("sessions", "estimated_cost_usd", a)
     return "COALESCE(NULLIF(%s, 0), %s, 0)" % (actual, est)
+
+
+def cron_sql(a="s"):
+    return "(%s.source = 'cron')" % a
 
 
 def activity_sql(db, a="s"):
@@ -63,6 +68,11 @@ def gateways(db, ctx):
         r["heartbeat_age_s"] = round(ctx.now - r["last_heartbeat"], 1)
         r["alive"] = r["heartbeat_age_s"] < HEARTBEAT_STALE_S
         r["uptime_s"] = round(ctx.now - r["started_at"]) if r["alive"] else None
+    # Hermes leaves rows behind for gateways that were restarted; drop old ones.
+    if any(r["alive"] for r in rows):
+        rows = [r for r in rows if r["alive"] or r["heartbeat_age_s"] < OLD_GATEWAY_S]
+    else:
+        rows = rows[:1]
     return rows
 
 
@@ -93,11 +103,12 @@ def now(db, ctx):
 def today(db, ctx):
     sub = db.is_subagent_sql()
     row = db.rows(
-        "SELECT sum(CASE WHEN NOT %s THEN 1 ELSE 0 END) AS conversations, "
+        "SELECT sum(CASE WHEN NOT %s AND NOT %s THEN 1 ELSE 0 END) AS conversations, "
+        "       sum(CASE WHEN %s THEN 1 ELSE 0 END) AS scheduled, "
         "       sum(CASE WHEN %s THEN 1 ELSE 0 END) AS subagents, "
         "       sum(%s) AS cost, sum(%s) AS tokens "
         "FROM sessions s WHERE s.started_at >= ?"
-        % (sub, sub, cost_sql(db), tokens_sql(db)), (ctx.day_start,))[0]
+        % (sub, cron_sql(), cron_sql(), sub, cost_sql(db), tokens_sql(db)), (ctx.day_start,))[0]
     out = {k: row[k] or 0 for k in row}
     # Messages and tool calls made today, including in conversations started earlier.
     # Joining through recently active sessions keeps this on the indexes.
@@ -124,15 +135,15 @@ def daily(db, ctx):
         t = time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday + i, 12, 0, 0, 0, 0, -1))
         key = time.strftime("%Y-%m-%d", time.localtime(t))
         index[key] = len(days)
-        days.append({"day": key, "conversations": 0, "subagents": 0, "cost": 0.0, "tokens": 0})
-    for r in db.rows("SELECT s.started_at, %s AS is_sub, %s AS cost, %s AS tokens "
+        days.append({"day": key, "conversations": 0, "scheduled": 0, "subagents": 0, "cost": 0.0, "tokens": 0})
+    for r in db.rows("SELECT s.started_at, %s AS is_sub, %s AS is_cron, %s AS cost, %s AS tokens "
                      "FROM sessions s WHERE s.started_at >= ?"
-                     % (db.is_subagent_sql(), cost_sql(db), tokens_sql(db)), (start,)):
+                     % (db.is_subagent_sql(), cron_sql(), cost_sql(db), tokens_sql(db)), (start,)):
         i = index.get(time.strftime("%Y-%m-%d", time.localtime(r["started_at"])))
         if i is None:
             continue
         d = days[i]
-        d["subagents" if r["is_sub"] else "conversations"] += 1
+        d["subagents" if r["is_sub"] else "scheduled" if r["is_cron"] else "conversations"] += 1
         d["cost"] += r["cost"] or 0
         d["tokens"] += r["tokens"] or 0
     for d in days:
@@ -166,7 +177,14 @@ def models(db, ctx):
         r["tokens"] = (r["input"] or 0) + (r["output"] or 0)
         r["cost"] = round(r["cost"] or 0, 4)
     rows.sort(key=lambda r: r["tokens"], reverse=True)
-    return {"days": WINDOW_DAYS, "rows": rows[:10]}
+    billing = []
+    cols = [c for c in ("billing_provider", "billing_mode", "cost_status") if db.has("sessions", c)]
+    if cols:
+        billing = db.rows("SELECT %s, count(*) AS sessions FROM sessions s WHERE s.started_at >= ? GROUP BY %s "
+                          "ORDER BY count(*) DESC LIMIT 5"
+                          % (", ".join("COALESCE(s.%s, '') AS %s" % (c, c) for c in cols),
+                             ", ".join(str(i + 1) for i in range(len(cols)))), (since,))
+    return {"days": WINDOW_DAYS, "rows": rows[:10], "priced": any(r["cost"] > 0 for r in rows), "billing": billing}
 
 
 def platforms(db, ctx):
@@ -196,7 +214,9 @@ def tools(db, ctx):
         t["calls"] += r["n"]
         t["by_disposition"][r["disposition"] or "unset"] = r["n"]
     rows = sorted(by_tool.values(), key=lambda t: t["calls"], reverse=True)
-    return {"days": WINDOW_DAYS, "rows": rows[:12]}
+    # Some Hermes versions don't label tool results; then failure rates can't be shown.
+    labelled = any(k != "unset" for t in by_tool.values() for k in t["by_disposition"])
+    return {"days": WINDOW_DAYS, "rows": rows[:12], "labelled": labelled}
 
 
 def warnings(db, ctx):
@@ -258,4 +278,5 @@ def recent(db, ctx):
         r["activity"] = ctx.text(r["activity"], 120)
         r["cost"] = round(r["cost"] or 0, 4)
         r["active"] = r["ended_at"] is None and ctx.now - (r["last_activity_at"] or 0) < ACTIVE_S
+        r["scheduled"] = r["source"] == "cron"
     return rows

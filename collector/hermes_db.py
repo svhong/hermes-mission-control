@@ -9,7 +9,10 @@ Rules this module keeps:
 import json
 import os
 import sqlite3
+import re
 import urllib.parse
+
+_HASH = re.compile(r"^[0-9a-f]{24,}$")
 
 # Hermes's own rule for "this session is a delegated subagent", copied from
 # the messages_fts_trigram_src view in state.db.
@@ -138,6 +141,8 @@ def parse_list(value, limit=12):
     out = []
     for it in items:
         s = str(it).strip()
+        if _HASH.match(s):  # some Hermes versions store a digest of the tool set, not names
+            continue
         if s and s not in out:
             out.append(s[:60])
     return out[:limit]
@@ -167,6 +172,25 @@ def pick_text(json_text, keys=("goal", "task", "title", "name", "description", "
                 nested = v
         obj = nested
     return None
+
+
+def json_strings(json_text, limit=2000):
+    """Every string value in a JSON blob (used only to find session ids it mentions)."""
+    try:
+        stack = [json.loads(json_text)] if json_text else []
+    except (ValueError, TypeError):
+        return set()
+    out = set()
+    while stack and len(out) < limit:
+        v = stack.pop()
+        if isinstance(v, str):
+            if len(v) <= 200:
+                out.add(v)
+        elif isinstance(v, dict):
+            stack.extend(v.values())
+        elif isinstance(v, list):
+            stack.extend(v)
+    return out
 
 
 def truncate(text, limit):
