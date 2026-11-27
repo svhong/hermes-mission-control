@@ -23,7 +23,15 @@ PRIVATE_MARKER = "FAKE-PRIVATE-TEXT-7f3a"
 SCHEMA = os.path.join(os.path.dirname(os.path.abspath(__file__)), "schema.sql")
 SCHEMA_VERSION = 41
 
-PLATFORMS = [("telegram", 6), ("discord", 3), ("cli", 2), ("cron", 2), ("slack", 1)]
+PLATFORMS = [("telegram", 6), ("discord", 3), ("cli", 2), ("slack", 1)]
+# Scheduled jobs, like ~/.hermes/cron/jobs.json on hermes-box: (id, name, cron expr, days of week or None,
+# hour, minute, repeat times, failing, paused)
+JOBS = [
+    ("a0220400e9a2", "Morning news digest", "5 8 * * *", None, 8, 5, None, False, False),
+    ("b41c9e0d77f1", "Combat sports briefing", "0 9 * * 1,4", {0, 3}, 9, 0, None, False, False),
+    ("79468cca4565", "Price tracker pilot", "30 8 * * *", None, 8, 30, 7, True, False),
+    ("c9d02a1be3f0", "Weekly backup check", "0 20 * * 0", {6}, 20, 0, None, False, True),
+]
 MODELS = [("anthropic/claude-sonnet-4.5", 5), ("nous/hermes-4-405b", 3), ("openai/gpt-5-mini", 2)]
 SUB_MODELS = [("openai/gpt-5-mini", 4), ("nous/hermes-4-70b", 3), ("anthropic/claude-haiku-4.5", 2)]
 PRICES = {  # $ per million input / output tokens (made up)
@@ -196,6 +204,81 @@ class Fake:
             self.worker(sid, "cron", "terminal")
         return sid
 
+    # ---- scheduled jobs (cron) ------------------------------------------------------
+
+    def cron_runs(self, now, days):
+        """Runs of each job on its schedule, titled like Hermes does: "Name · Nov 26 08:05"."""
+        from datetime import datetime, timedelta
+        today = datetime.fromtimestamp(now).replace(hour=0, minute=0, second=0, microsecond=0)
+        self.job_runs = {}
+        for jid, name, expr, dows, hour, minute, repeat, failing, paused in JOBS:
+            runs = []
+            start_day = 2 if repeat else days      # the pilot started 3 days ago
+            for d in range(start_day, -1, -1):
+                day = today - timedelta(days=d)
+                if dows is not None and day.weekday() not in dows:
+                    continue
+                at = day.replace(hour=hour, minute=minute) + timedelta(seconds=random.uniform(2, 9))
+                if at.timestamp() > now or (paused and d < 5):
+                    continue
+                last_two = failing and d <= 1
+                dur = random.uniform(150, 420)
+                sid = self.session(at.timestamp(), "cron", pick(MODELS),
+                                   title="%s · %s" % (name, at.strftime("%b %d %H:%M")),
+                                   ended=at.timestamp() + dur,
+                                   end_reason="cron_error: delivery failed" if last_two else "cron_complete",
+                                   activity_at=at.timestamp() + dur - 20, n_messages=random.randint(20, 50))
+                self.worker(sid, "cron", "terminal")
+                runs.append(at.timestamp())
+            self.job_runs[jid] = runs
+
+    def write_jobs(self, now):
+        """jobs.json next to state.db, with the fields a real install has."""
+        from datetime import datetime, timedelta
+        cron_dir = os.path.join(os.path.dirname(os.path.abspath(self.path)), "cron")
+        os.makedirs(cron_dir, exist_ok=True)
+        tz = datetime.now().astimezone().tzinfo
+        iso = lambda t: datetime.fromtimestamp(t, tz).isoformat() if t else None  # noqa: E731
+        jobs = []
+        for jid, name, expr, dows, hour, minute, repeat, failing, paused in JOBS:
+            runs = self.job_runs.get(jid, [])
+            nxt = None
+            if not paused:
+                day = datetime.fromtimestamp(now).replace(hour=hour, minute=minute, second=0, microsecond=0)
+                while day.timestamp() <= now or (dows is not None and day.weekday() not in dows):
+                    day += timedelta(days=1)
+                nxt = day.timestamp()
+            jobs.append({
+                "id": jid, "name": name, "prompt": "Prompt " + PRIVATE_MARKER, "skills": ["web", "news"],
+                "skill": None, "model": None, "provider": None, "base_url": None, "script": None,
+                "no_agent": False, "context_from": [], "origin": {"chat": PRIVATE_MARKER},
+                "schedule": {"kind": "cron", "expr": expr, "display": expr}, "schedule_display": expr,
+                "repeat": {"times": repeat, "completed": len(runs)}, "enabled": not paused,
+                "state": "paused" if paused else "scheduled",
+                "paused_at": iso(now - 5 * 86400) if paused else None,
+                "paused_reason": "Paused while the NAS is offline" if paused else None,
+                "created_at": iso(now - 20 * 86400), "next_run_at": iso(nxt),
+                "last_run_at": iso(runs[-1]) if runs else None,
+                "last_status": "error" if failing else ("ok" if runs else None),
+                "last_error": "Telegram delivery failed: HTTP 502" if failing else None,
+                "last_delivery_error": "HTTP 502 from api.telegram.org" if failing else None,
+                "failure_streak": 2 if failing else 0,
+                "deliver": "telegram:" + PRIVATE_MARKER, "timezone": "America/Chicago", "catch_up": True,
+                "last_dispatch": {"scheduled_at": iso(runs[-1]) if runs else None,
+                                  "lateness_seconds": 5.5, "kind": "on_time"} if runs else None,
+                "canonical_completions": [],
+            })
+        with open(os.path.join(cron_dir, "jobs.json"), "w") as f:
+            json.dump({"jobs": jobs}, f, indent=1)
+        self.tick_scheduler(now)
+
+    def tick_scheduler(self, now=None):
+        cron_dir = os.path.join(os.path.dirname(os.path.abspath(self.path)), "cron")
+        if os.path.isdir(cron_dir):
+            for name in ("ticker_heartbeat", "ticker_last_success"):
+                with open(os.path.join(cron_dir, name), "w") as f:
+                    f.write("%.6f" % (now or time.time()))
+
     # ---- whole database ----------------------------------------------------------
 
     def populate(self, days=14):
@@ -208,6 +291,7 @@ class Fake:
                 self.conversation(started)
         for _ in range(2):
             self.conversation(now - random.uniform(600, 3600), active=True)
+        self.cron_runs(now, days)
         for i in range(3):
             self.db.execute(
                 "INSERT INTO resumable_subagents VALUES (?,?,?,?,?,?,?,?,?,?)",
@@ -227,6 +311,7 @@ class Fake:
                         "FROM sessions WHERE ended_at IS NULL LIMIT 1", (json.dumps({"text": PRIVATE_MARKER}),))
         self.heartbeat(now - 5 * 3600)
         self.db.execute("COMMIT")
+        self.write_jobs(now)
 
     def heartbeat(self, started=None):
         now = time.time()
@@ -240,6 +325,7 @@ class Fake:
         """One step of --live: keep things moving."""
         now = time.time()
         self.heartbeat()
+        self.tick_scheduler(now)
         active = [r[0] for r in self.db.execute(
             "SELECT id FROM sessions WHERE ended_at IS NULL AND source != 'subagent'")]
         if len(active) < 2 or random.random() < 0.03:

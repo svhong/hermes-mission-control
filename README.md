@@ -36,6 +36,13 @@ platform; tool calls with failure rates; warnings (gateway down, failed
 deliveries, compression failures, repeated chat failures, handoff errors);
 recently active conversations.
 
+**Scheduled**: whether Hermes's scheduler is ticking; the next run; runs
+today; every cron job with its schedule in plain words ("Mon & Thu 09:00"),
+next and last run, and a strip of its recent runs (click for details such as
+delivery platform, timing and the last error); jobs that are failing, overdue
+or whose results couldn't be delivered; and runs in progress. Job definitions
+come from `~/.hermes/cron/jobs.json`, runs from the database.
+
 **Agents**: profiles with their gateway status; a tree of conversations and
 the subagents they delegated to (nested subagents included, running ones
 first, click a row for details); background delegations with their task and
@@ -46,8 +53,9 @@ delivery state; resumable subagents.
 The collector reads counts, times, token figures, costs, model and tool
 names. With the default settings it also sends short **titles**, the
 **current activity** line, and the **goal** of background delegations
-(each cut to a sentence or two). It **never** reads message text, system
-prompts, reasoning, chat or user IDs, or delivery content. A test checks
+(each cut to a sentence or two), plus job names and their last error. It
+**never** reads message text, system prompts, reasoning, chat or user IDs,
+delivery content, or scheduled jobs' prompts and output. A test checks
 this on every run.
 
 For numbers only, install with `--numbers-only`.
@@ -127,8 +135,8 @@ Each tab is two files:
   in `hub/static/lib.js` (cards, tiles, tables, bar and column charts, status
   pills).
 
-The tab appears automatically. Ideas: scheduled jobs (cron), skills,
-memory, hosted rooms (multi-agent), a log tail.
+The tab appears automatically. Ideas: skills, memory, hosted rooms
+(multi-agent), a log tail.
 
 ## More agents later
 

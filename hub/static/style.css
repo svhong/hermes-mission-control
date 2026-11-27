@@ -269,3 +269,40 @@ main { max-width: 1320px; margin: 0 auto; padding: 16px; }
 .conv-activity { color: var(--text); }
 .live-label { color: var(--good); font-weight: 600; }
 .slot-muted { background: var(--text-2); opacity: .45; }
+
+/* ---- scheduled ---- */
+.tiles.four { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+@media (max-width: 900px) { .tiles.four { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+.tile-pill { margin: 6px 0 4px; }
+.conv-head.static { cursor: default; }
+.jobs { display: flex; flex-direction: column; }
+.job { border-top: 1px solid var(--border); }
+.job.is-failing { box-shadow: inset 3px 0 0 var(--critical); }
+.job-row {
+  display: grid; grid-template-columns: 104px minmax(0, 2fr) minmax(0, 1.1fr) minmax(0, 1.1fr) minmax(0, 1.1fr) minmax(0, 1.5fr);
+  gap: 12px; align-items: center; width: 100%; text-align: left; padding: 10px 8px;
+  background: none; border: 0; cursor: pointer;
+}
+button.job-row:hover { background: var(--surface-2); }
+button.job-row:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.job-row > span { display: flex; flex-direction: column; min-width: 0; }
+.job-head { cursor: default; padding-top: 0; color: var(--text-2); font-size: 12px; font-weight: 500; }
+.job-name > * { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.run-strip { display: flex; flex-direction: column; gap: 3px; }
+.run-dots { display: flex; flex-wrap: wrap; gap: 3px; }
+.run-dot {
+  width: 16px; height: 16px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center;
+  font-size: 9px; line-height: 1; font-weight: 700;
+}
+.run-dot.live { animation: pulse 1.6s ease-in-out infinite; }
+@media (prefers-reduced-motion: reduce) { .run-dot.live { animation: none; } }
+@media (max-width: 800px) {
+  .job-head { display: none; }
+  .job-row { grid-template-columns: minmax(0, 1fr); gap: 6px; }
+  .job-row > span[data-label] { flex-direction: row; flex-wrap: wrap; gap: 4px 8px; align-items: baseline; }
+  .job-row > span[data-label]::before { content: attr(data-label); color: var(--text-2); font-size: 12px; min-width: 84px; }
+  .job-row > span:first-child { order: -1; }
+}
+.job-row > span:first-child { align-items: flex-start; }
+.run-dot { width: 13px; height: 13px; font-size: 8px; }
+.run-dots { gap: 2px; }

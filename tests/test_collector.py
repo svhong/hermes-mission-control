@@ -35,7 +35,7 @@ class CollectorTest(unittest.TestCase):
         r = self.report()
         self.assertTrue(r["db"]["ok"], r["db"])
         self.assertEqual(r["db"]["schema_version"], fake_hermes.SCHEMA_VERSION)
-        self.assertEqual([t["id"] for t in r["tabs"]], ["overview", "agents"])
+        self.assertEqual([t["id"] for t in r["tabs"]], ["overview", "scheduled", "agents"])
         for tab, data in r["data"].items():
             self.assertNotIn("_error", data, tab)
             for name, section in data.items():
@@ -282,6 +282,70 @@ class IdleLoopTest(unittest.TestCase):
         after = [r for r in reads if r >= 200]
         self.assertLessEqual(after[0] - 200, 5.5)       # within one check
         self.assertGreaterEqual(len(after), 15)          # then every 5 s again
+
+
+class ScheduledTest(unittest.TestCase):
+    def test_describe_schedules(self):
+        from tabs.scheduled import describe
+        self.assertEqual(describe("0 8 * * *"), "Daily 08:00")
+        self.assertEqual(describe("30 8 * * *"), "Daily 08:30")
+        self.assertEqual(describe("0 9 * * 1,4"), "Mon & Thu 09:00")
+        self.assertEqual(describe("0 7 * * 1-5"), "Weekdays 07:00")
+        self.assertEqual(describe("0 20 * * 0"), "Sun 20:00")
+        self.assertEqual(describe("0 20 * * 7"), "Sun 20:00")
+        self.assertEqual(describe("0 9 * * 1,3,5"), "Mon, Wed, Fri 09:00")
+        self.assertEqual(describe("15 * * * *"), "Hourly at :15")
+        self.assertEqual(describe("*/10 * * * *"), "Every 10 min")
+        self.assertEqual(describe("0 6 1 * *"), "Monthly on day 1 06:00")
+        self.assertEqual(describe("0 6 1 1 *"), "0 6 1 1 *")          # unusual: shown as is
+        self.assertEqual(describe("@daily"), "@daily")
+
+    def test_run_name(self):
+        from tabs.scheduled import run_name
+        self.assertEqual(run_name("Israel morning briefing \u00b7 Nov 26 08:05"), "Israel morning briefing")
+        self.assertEqual(run_name(None), "")
+
+    def test_jobs_from_fake_hermes(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        path = os.path.join(tmp.name, "state.db")
+        fake = fake_hermes.Fake(path)
+        fake.populate()
+        fake.db.close()
+        data = Collector(path, "t", True).report(force=True)["data"]["scheduled"]
+        jobs = {j["name"]: j for j in data["jobs"]["jobs"]}
+        self.assertEqual(set(jobs), {j[1] for j in fake_hermes.JOBS})
+        self.assertEqual(jobs["Price tracker pilot"]["status"], "failing")
+        self.assertEqual(jobs["Weekly backup check"]["status"], "paused")
+        self.assertIsNone(jobs["Weekly backup check"]["next_run_at"])
+        self.assertEqual(jobs["Combat sports briefing"]["schedule"], "Mon & Thu 09:00")
+        self.assertEqual(jobs["Morning news digest"]["deliver"], "telegram")   # chat id dropped
+        self.assertTrue(jobs["Morning news digest"]["runs"])                   # runs matched by title
+        self.assertTrue(any(p["text"].startswith("Price tracker pilot has failed") for p in data["problems"]))
+        self.assertTrue(data["scheduler"]["ticking"])
+
+    def test_overdue_and_missing_jobs_file(self):
+        import time
+        from tabs import Context
+        from tabs.scheduled import jobs as jobs_section
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        path = os.path.join(tmp.name, "state.db")
+        conn = sqlite3.connect(path)
+        with open(fake_hermes.SCHEMA) as f:
+            conn.executescript(f.read())
+        conn.close()
+        cron = os.path.join(tmp.name, "cron")
+        with HermesDB(path) as db:
+            self.assertFalse(jobs_section(db, Context(), cron)["jobs_file"])
+            os.makedirs(cron)
+            with open(os.path.join(cron, "jobs.json"), "w") as f:
+                json.dump({"jobs": [{"id": "j1", "name": "Late job", "enabled": True,
+                                     "schedule": {"kind": "cron", "expr": "0 8 * * *"},
+                                     "next_run_at": time.time() - 3600, "last_status": "ok"}]}, f)
+            job = jobs_section(db, Context(), cron)["jobs"][0]
+        self.assertTrue(job["overdue"])
+        self.assertEqual(job["status"], "overdue")
 
 
 class HelpersTest(unittest.TestCase):
