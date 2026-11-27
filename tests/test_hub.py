@@ -64,6 +64,18 @@ class HubTest(unittest.TestCase):
         # Only tabs with a renderer in static/tabs are offered.
         self.assertEqual([t["id"] for t in state["tabs"]], ["overview"])
 
+    def test_watching_signal(self):
+        hub.viewers["last"] = 0.0
+        report = {"source": "hermes", "tabs": [], "data": {}}
+        code, body = self.call("/api/report", report, {"X-HMC-Token": "test-token"})
+        self.assertFalse(json.loads(body)["watching"])
+        self.assertEqual(self.call("/api/watching")[0], 401)
+        self.call("/api/state", headers={"Authorization": "Bearer " + self.login()})  # a dashboard polls
+        code, body = self.call("/api/watching", headers={"X-HMC-Token": "test-token"})
+        self.assertTrue(json.loads(body)["watching"])
+        code, body = self.call("/api/report", report, {"X-HMC-Token": "test-token"})
+        self.assertTrue(json.loads(body)["watching"])
+
     def test_static_files_and_traversal(self):
         self.assertEqual(self.call("/")[0], 200)
         self.assertEqual(self.call("/static/app.js")[0], 200)

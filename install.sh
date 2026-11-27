@@ -92,7 +92,9 @@ PW_HASH="$(old $CONF/hub.env HMC_VIEW_PASSWORD_HASH)"
 [[ -n $HERMES_USER ]] || HERMES_USER="$(old $CONF/collector.env HMC_HERMES_USER)"
 [[ -n $DB ]]         || DB="$(old $CONF/collector.env HMC_DB)"
 [[ -n $SHOW_TEXT ]]  || SHOW_TEXT="$(old $CONF/collector.env HMC_SHOW_TEXT)"
+IDLE_INTERVAL="$(old $CONF/collector.env HMC_IDLE_INTERVAL)"
 PORT="${PORT:-8788}"; HTTPS="${HTTPS:-0}"; SHOW_TEXT="${SHOW_TEXT:-1}"; HERMES_USER="${HERMES_USER:-hermes}"
+IDLE_INTERVAL="${IDLE_INTERVAL:-60}"
 [[ -n $TOKEN ]] || TOKEN="$(python3 -c 'import secrets; print(secrets.token_urlsafe(24))')"
 
 # --- Hermes ------------------------------------------------------------------------------
@@ -161,6 +163,7 @@ HMC_TOKEN=$TOKEN
 HMC_DB=$DB
 HMC_SOURCE=hermes
 HMC_INTERVAL=5
+HMC_IDLE_INTERVAL=$IDLE_INTERVAL
 HMC_SHOW_TEXT=$SHOW_TEXT
 HMC_HERMES_USER=$HERMES_USER
 EOF

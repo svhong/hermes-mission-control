@@ -91,7 +91,10 @@ function renderTop(source) {
   const r = source.report;
   const items = [];
   // A source is stale if the collector hasn't reported for a while.
-  if (source.age_s > 30) items.push(pill('stale', `Collector silent ${ago(state.now - source.age_s, state.now)}`));
+  // The collector reports every few seconds while someone watches, about once a
+  // minute otherwise; only warn when it's well past its own schedule.
+  const allowed = Math.max(30, (r.interval_s || 5) * 2 + 15);
+  if (source.age_s > allowed) items.push(pill('stale', `Collector silent ${ago(state.now - source.age_s, state.now)}`));
   else if (!r.db?.ok) items.push(pill('critical', 'Database unreadable'));
   const gws = r.data?.overview?.gateways;
   if (Array.isArray(gws)) {
@@ -152,6 +155,8 @@ async function render() {
 
 async function poll() {
   clearTimeout(timer);
+  // A hidden tab doesn't poll, so the collector can slow down; we poll again when it's shown.
+  if (document.hidden) { timer = setTimeout(poll, POLL_MS); return; }
   try {
     state = await api('/api/state');
     // The dashboard was updated since this page loaded: reload to get the new code.

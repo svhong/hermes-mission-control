@@ -245,6 +245,45 @@ class GatewayProcessTest(unittest.TestCase):
             self.assertIn("isn't running", warnings(db, Context(now))[0]["text"])
 
 
+class IdleLoopTest(unittest.TestCase):
+    """The collector reads often only while a dashboard is open (simulated clock)."""
+
+    def simulate(self, seconds, viewer_from=None):
+        import collector as col
+        t = {"now": 0.0}
+        reads, checks = [], []
+        watching = lambda: viewer_from is not None and t["now"] >= viewer_from  # noqa: E731
+
+        def collect():
+            reads.append(t["now"])
+            return {}
+
+        def send(report):
+            return watching()
+
+        def check():
+            checks.append(t["now"])
+            return watching()
+
+        def sleep(s):
+            t["now"] += s
+
+        col.run(collect, send, check, sleep=sleep, clock=lambda: t["now"],
+                cycles=int(seconds / col.INTERVAL) + 5, log=lambda *a, **k: None)
+        return [r for r in reads if r <= seconds], checks
+
+    def test_idle_reads_about_once_a_minute(self):
+        reads, checks = self.simulate(600)
+        self.assertLessEqual(len(reads), 12)   # vs 120 when always reading every 5 s
+        self.assertGreater(len(checks), 100)   # cheap "anyone watching?" pings instead
+
+    def test_reads_right_away_when_someone_opens_the_dashboard(self):
+        reads, _ = self.simulate(300, viewer_from=200)
+        after = [r for r in reads if r >= 200]
+        self.assertLessEqual(after[0] - 200, 5.5)       # within one check
+        self.assertGreaterEqual(len(after), 15)          # then every 5 s again
+
+
 class HelpersTest(unittest.TestCase):
     def test_parse_list(self):
         self.assertEqual(parse_list('["a", "b", "a"]'), ["a", "b"])

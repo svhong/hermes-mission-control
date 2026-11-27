@@ -140,6 +140,14 @@ class Ledger:
 
 ledger = Ledger(os.path.join(STATE_DIR, "ledger.json") if STATE_DIR else None)
 
+WATCH_WINDOW_S = 20   # a dashboard polls every 5 s; silent this long means nobody's looking
+viewers = {"last": 0.0}
+
+
+def watching():
+    return time.time() - viewers["last"] < WATCH_WINDOW_S
+
+
 sources = {}   # source id -> {"report": ..., "received": t}
 sessions = {}  # login token -> expiry
 failures = {"count": 0, "locked_until": 0.0}
@@ -298,7 +306,12 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/state":
             if PASSWORD_HASH and not session_valid(self._bearer()):
                 return self._json(401, {"error": "login required"})
+            viewers["last"] = time.time()
             return self._json(200, snapshot())
+        if path == "/api/watching":  # asked by idle collectors
+            if not hmac.compare_digest(self.headers.get("X-HMC-Token", ""), TOKEN):
+                return self._json(401, {"error": "bad token"})
+            return self._json(200, {"watching": watching()})
         if path == "/api/health":
             return self._json(200, {"ok": True, "password": bool(PASSWORD_HASH)})
         self._json(404, {"error": "not found"})
@@ -321,7 +334,7 @@ class Handler(BaseHTTPRequestHandler):
                 record(body)
             except ValueError as e:
                 return self._json(400, {"error": str(e)})
-            return self._json(200, {"ok": True})
+            return self._json(200, {"ok": True, "watching": watching()})
 
         if path == "/api/login":
             if not PASSWORD_HASH:

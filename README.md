@@ -52,6 +52,16 @@ this on every run.
 
 For numbers only, install with `--numbers-only`.
 
+### Resource use
+
+Lightweight by design. Measured on hermes-box: the collector used about
+0.2% of one CPU core and 18 MB of memory, and each read of Hermes's database
+took about 5 ms. It reads every 5 seconds only while a dashboard is open; when
+nobody is watching it reads once a minute (`HMC_IDLE_INTERVAL`) and just asks
+the hub every 5 seconds whether someone opened the dashboard, which doesn't
+touch the database. Hidden browser tabs don't count as watching. The hub
+writes one small file (the daily token ledger) once a minute.
+
 ## Install on hermes-box
 
 ```bash
