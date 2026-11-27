@@ -98,9 +98,30 @@ To update after a `git pull`, run `sudo ./install.sh` again. Settings are kept.
 | `--set-password` | change the viewer password |
 | `--numbers-only` | don't send titles, activity or task goals |
 | `--garage-url URL` | "Machine health" link in the header |
+| `--hermes-data DIR` | Hermes runs in Docker: its data folder on this machine (see below) |
 | `--https` | also serve on `https://<machine>.<tailnet>.ts.net:8443` via `tailscale serve` |
 | `--port N` | dashboard port (default 8788) |
 | `--uninstall` | remove everything (Hermes isn't touched) |
+
+### Hermes in Docker
+
+When Hermes runs in a container, its data lives in a Docker volume such as
+`/var/lib/docker/volumes/nova-data/_data` (find it with
+`docker inspect <container> --format '{{range .Mounts}}{{.Source}}{{end}}'`).
+Only root can open `/var/lib/docker`, so point the installer at the folder
+and systemd gives the collector a read-only view of just that folder:
+
+```bash
+sudo ./install.sh --hermes-data /var/lib/docker/volumes/nova-data/_data
+```
+
+The collector runs as the owner of `state.db` (the user id Hermes has inside
+the container, e.g. 10000). If that id has no name on this machine the
+installer tells you how to add one. Running as that user is also how it finds
+the gateway process; the container's own pid for it is matched to the
+heartbeat, so the gateway shows up once, with its real uptime. Nothing in the
+container or the volume is changed. `--db PATH` switches back to a normal
+install.
 
 ## Try it on any computer
 

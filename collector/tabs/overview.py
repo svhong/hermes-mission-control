@@ -14,6 +14,7 @@ ACTIVE_S = 600        # a conversation counts as active if it did something in t
 SUB_ACTIVE_S = 120    # same for subagents, which work in short bursts
 HEARTBEAT_STALE_S = 180   # Hermes writes a heartbeat about once a minute
 OLD_GATEWAY_S = 3600      # hide dead gateway entries older than this when another one is alive
+SAME_START_S = 120        # a heartbeat row and a process started this close together are the same gateway
 
 
 def collect(db, ctx):
@@ -65,6 +66,10 @@ def gateways(db, ctx):
 
     Hermes stops writing heartbeats while idle, so on hermes-box the process
     check is what decides; the heartbeat is shown for information.
+
+    When Hermes runs in a container (Docker), its heartbeat records the
+    container's hostname and the pid as seen inside the container, so those
+    rows are matched to a running process by that inner pid instead.
     """
     rows = []
     if db.has("gateway_heartbeats", "pid", "started_at", "last_heartbeat"):
@@ -73,41 +78,63 @@ def gateways(db, ctx):
                        % (db.col("gateway_heartbeats", "profile", default="''"),
                           db.col("gateway_heartbeats", "host", default="''")))
     this_host = socket.gethostname()
-    procs = gateway_processes()
+    scan = scan_gateways()
+    procs = None if scan is None else {pid: p["start"] for pid, p in scan.items()}
+    by_inner = {} if scan is None else {p["inner_pid"]: pid for pid, p in scan.items() if p["inner_pid"]}
     matched = set()
     for r in rows:
         r["profile"] = r["profile"] or "default"
         r["heartbeat_age_s"] = round(ctx.now - r["last_heartbeat"], 1)
         r["heartbeat_fresh"] = r["heartbeat_age_s"] < HEARTBEAT_STALE_S
         local = r["host"] in ("", this_host)
-        r["process_running"] = (r["pid"] in procs) if procs is not None and local else None
-        if r["process_running"]:
-            matched.add(r["pid"])
+        pid = None
+        if procs is not None:
+            if local and r["pid"] in procs and r["pid"] not in matched:
+                pid = r["pid"]
+            elif r["pid"] in by_inner and by_inner[r["pid"]] not in matched \
+                    and abs(procs[by_inner[r["pid"]]] - r["started_at"]) < SAME_START_S:
+                # Containers reuse small pids, so the start time must match too.
+                pid = by_inner[r["pid"]]
+        if pid is not None:
+            matched.add(pid)
+            r.update(pid=pid, process_running=True, checked_process=True)
+        else:
+            r["process_running"] = False if procs is not None and local else None
+            r["checked_process"] = procs is not None and local
         r["alive"] = r["heartbeat_fresh"] or bool(r["process_running"])
-        start = procs[r["pid"]] if r["process_running"] else r["started_at"]
+        start = procs[pid] if pid is not None else r["started_at"]
         r["uptime_s"] = round(ctx.now - start) if r["alive"] else None
     # A running gateway whose pid has no heartbeat row (e.g. restarted while idle).
     for pid, start in sorted((procs or {}).items(), key=lambda kv: -kv[1]):
         if pid not in matched:
             rows.insert(0, {"pid": pid, "started_at": start, "last_heartbeat": None, "profile": "default",
                             "host": this_host, "heartbeat_age_s": None, "heartbeat_fresh": False,
-                            "process_running": True, "alive": True, "uptime_s": round(ctx.now - start)})
+                            "process_running": True, "checked_process": True, "alive": True,
+                            "uptime_s": round(ctx.now - start)})
     # Hermes leaves rows behind for gateways that were restarted; drop old ones.
     if any(r["alive"] for r in rows):
         rows = [r for r in rows if r["alive"] or (r["heartbeat_age_s"] or 0) < OLD_GATEWAY_S]
     else:
         rows = rows[:1]
-    for r in rows:
-        r["checked_process"] = procs is not None and r["host"] in ("", this_host)
     return rows
 
 
 def gateway_processes():
-    """{pid: start time} of Hermes gateway processes ("... gateway run") owned by
-    this user, which is the Hermes user. None if /proc isn't available.
+    """{pid: start time} of Hermes gateway processes owned by this user. None if
+    /proc isn't available. See scan_gateways()."""
+    scan = scan_gateways()
+    return None if scan is None else {pid: p["start"] for pid, p in scan.items()}
+
+
+def scan_gateways():
+    """{pid: {"start": time, "inner_pid": pid inside its container or None}} of
+    Hermes gateway processes ("... gateway run") owned by this user, which is the
+    Hermes user. None if /proc isn't available.
 
     The same test garage-monitor uses. Processes forked from a gateway share
-    its command line, so only the top one of each family is returned.
+    its command line, so only the top one of each family is returned. Wrapper
+    scripts that pass "gateway run" along (e.g. a container's entrypoint, run
+    by root) are skipped because they belong to another user.
     """
     try:
         with open("/proc/stat") as f:
@@ -117,7 +144,7 @@ def gateway_processes():
     except (OSError, ValueError, StopIteration):
         return None
     uid = os.getuid()
-    found = {}  # pid -> (start, ppid)
+    found = {}  # pid -> (start, ppid, inner pid)
     for name in names:
         if not name.isdigit():
             continue
@@ -131,10 +158,25 @@ def gateway_processes():
             with open("/proc/%s/stat" % name) as f:
                 fields = f.read().rsplit(")", 1)[1].split()
             # After the command name: state, ppid, ...; field 22 overall is the start time.
-            found[int(name)] = (boot + float(fields[19]) / tick, int(fields[1]))
+            found[int(name)] = (boot + float(fields[19]) / tick, int(fields[1]), _inner_pid(name))
         except (OSError, ValueError, IndexError):
             continue
-    return {pid: start for pid, (start, ppid) in found.items() if ppid not in found}
+    return {pid: {"start": start, "inner_pid": inner}
+            for pid, (start, ppid, inner) in found.items() if ppid not in found}
+
+
+def _inner_pid(pid):
+    """The pid a process has inside its own container, or None if it isn't in one.
+    The "NSpid:" line lists its pid in each pid namespace, outermost first."""
+    try:
+        with open("/proc/%s/status" % pid) as f:
+            for line in f:
+                if line.startswith("NSpid:"):
+                    ids = line.split()[1:]
+                    return int(ids[-1]) if len(ids) > 1 else None
+    except (OSError, ValueError):
+        pass
+    return None
 
 
 def now(db, ctx):

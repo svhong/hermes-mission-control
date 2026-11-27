@@ -8,6 +8,10 @@
 # Options:
 #   --hermes-user NAME   Linux user that runs Hermes (default: hermes)
 #   --db PATH            Hermes database (default: ~NAME/.hermes/state.db)
+#   --hermes-data DIR    Hermes's data folder when Hermes runs in Docker, e.g.
+#                        /var/lib/docker/volumes/nova-data/_data (the folder holding
+#                        state.db). The collector gets a read-only view of just that
+#                        folder and runs as its owner (override with --hermes-user).
 #   --port N             dashboard port (default 8788; garage-monitor uses 8787)
 #   --numbers-only       don't send titles, activity or task goals, only numbers
 #   --garage-url URL     link to your garage-monitor dashboard, e.g. http://hermes-box:8787
@@ -35,6 +39,9 @@ HTTPS_PORT=8443
 ROLE=install
 HERMES_USER=""
 DB=""
+DB_SET=0
+HERMES_DATA=""
+DATA_SET=0
 PORT=""
 SHOW_TEXT=""
 GARAGE_URL=""
@@ -48,19 +55,21 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --uninstall)    ROLE=uninstall ;;
     --hermes-user)  HERMES_USER="${2:?--hermes-user needs a name}"; shift ;;
-    --db)           DB="${2:?--db needs a path}"; shift ;;
+    --db)           DB="${2:?--db needs a path}"; DB_SET=1; shift ;;
+    --hermes-data)  HERMES_DATA="${2:?--hermes-data needs a folder}"; DATA_SET=1; shift ;;
     --port)         PORT="${2:?--port needs a number}"; shift ;;
     --numbers-only) SHOW_TEXT=0 ;;
     --garage-url)   GARAGE_URL="${2:?--garage-url needs a URL}"; shift ;;
     --set-password) SET_PASSWORD=1 ;;
     --https)        HTTPS=1 ;;
-    -h|--help)      sed -n '2,25p' "$0"; exit 0 ;;
+    -h|--help)      sed -n '2,28p' "$0"; exit 0 ;;
     *)              die "unknown option: $1 (try --help)" ;;
   esac
   shift
 done
 
 [[ $EUID -eq 0 ]] || die "run with sudo: sudo $0 $*"
+[[ $DATA_SET -eq 1 && $DB_SET -eq 1 ]] && die "use either --db or --hermes-data, not both"
 
 if [[ $ROLE == uninstall ]]; then
   say "Stopping and removing services"
@@ -89,20 +98,44 @@ PW_HASH="$(old $CONF/hub.env HMC_VIEW_PASSWORD_HASH)"
 [[ -n $PORT ]]       || PORT="$(old $CONF/hub.env HMC_PORT)"
 [[ -n $GARAGE_URL ]] || GARAGE_URL="$(old $CONF/hub.env HMC_GARAGE_URL)"
 [[ -n $HTTPS ]]      || HTTPS="$(old $CONF/hub.env HMC_HTTPS)"
-[[ -n $HERMES_USER ]] || HERMES_USER="$(old $CONF/collector.env HMC_HERMES_USER)"
-[[ -n $DB ]]         || DB="$(old $CONF/collector.env HMC_DB)"
+# --db switches back from --hermes-data; otherwise keep whichever was used before.
+[[ $DB_SET -eq 1 || $DATA_SET -eq 1 ]] || HERMES_DATA="$(old $CONF/collector.env HMC_HERMES_DATA)"
+[[ $DATA_SET -eq 1 || -n $HERMES_DATA || -n $DB ]] || DB="$(old $CONF/collector.env HMC_DB)"
+# A new --hermes-data picks its owner as the user, not the previously saved one.
+[[ -n $HERMES_USER || $DATA_SET -eq 1 ]] || HERMES_USER="$(old $CONF/collector.env HMC_HERMES_USER)"
 [[ -n $SHOW_TEXT ]]  || SHOW_TEXT="$(old $CONF/collector.env HMC_SHOW_TEXT)"
 IDLE_INTERVAL="$(old $CONF/collector.env HMC_IDLE_INTERVAL)"
-PORT="${PORT:-8788}"; HTTPS="${HTTPS:-0}"; SHOW_TEXT="${SHOW_TEXT:-1}"; HERMES_USER="${HERMES_USER:-hermes}"
+PORT="${PORT:-8788}"; HTTPS="${HTTPS:-0}"; SHOW_TEXT="${SHOW_TEXT:-1}"
 IDLE_INTERVAL="${IDLE_INTERVAL:-60}"
 [[ -n $TOKEN ]] || TOKEN="$(python3 -c 'import secrets; print(secrets.token_urlsafe(24))')"
 
 # --- Hermes ------------------------------------------------------------------------------
+# With --hermes-data the collector sees Hermes's folder here, inside its sandbox.
+# (/var/lib/docker can only be opened by root, so the folder is mounted here instead.)
+DATA_VIEW=/run/$APP-collector/hermes
+if [[ -n $HERMES_DATA ]]; then
+  HERMES_DATA="$(realpath -e "$HERMES_DATA" 2>/dev/null)" || die "folder not found: $HERMES_DATA"
+  [[ -f $HERMES_DATA/state.db ]] || die "no state.db in $HERMES_DATA (pass the folder that holds it)"
+  if [[ -z $HERMES_USER ]]; then
+    HERMES_USER="$(stat -c %U "$HERMES_DATA/state.db")"
+    if [[ $HERMES_USER == UNKNOWN ]]; then
+      DATA_UID="$(stat -c %u "$HERMES_DATA/state.db")"
+      die "state.db is owned by uid $DATA_UID, which has no name on this machine. Give it one, then run this again:
+  sudo useradd --system --uid $DATA_UID --no-create-home --shell /usr/sbin/nologin hermes-docker"
+    fi
+  fi
+  DB="$DATA_VIEW/state.db"
+fi
+HERMES_USER="${HERMES_USER:-hermes}"
 id "$HERMES_USER" &>/dev/null || die "user '$HERMES_USER' doesn't exist; pass --hermes-user NAME"
-HERMES_HOME="$(getent passwd "$HERMES_USER" | cut -d: -f6)"
-DB="${DB:-$HERMES_HOME/.hermes/state.db}"
-[[ -f $DB ]] || die "Hermes database not found at $DB (pass --db PATH)"
-say "Hermes: user $HERMES_USER, database $DB"
+if [[ -n $HERMES_DATA ]]; then
+  say "Hermes: user $HERMES_USER, data folder $HERMES_DATA (read-only view at $DATA_VIEW)"
+else
+  HERMES_HOME="$(getent passwd "$HERMES_USER" | cut -d: -f6)"
+  DB="${DB:-$HERMES_HOME/.hermes/state.db}"
+  [[ -f $DB ]] || die "Hermes database not found at $DB (pass --db PATH, or --hermes-data DIR if Hermes runs in Docker)"
+  say "Hermes: user $HERMES_USER, database $DB"
+fi
 
 TS_IP="$(tailscale ip -4 2>/dev/null | head -n1 || true)"
 TS_NAME="$(tailscale status --json 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin)["Self"]["DNSName"].rstrip("."))' 2>/dev/null || true)"
@@ -166,13 +199,27 @@ HMC_INTERVAL=5
 HMC_IDLE_INTERVAL=$IDLE_INTERVAL
 HMC_SHOW_TEXT=$SHOW_TEXT
 HMC_HERMES_USER=$HERMES_USER
+HMC_HERMES_DATA=$HERMES_DATA
 EOF
 chgrp "$(id -gn "$HERMES_USER")" "$CONF/collector.env"
 umask 022
 
 # --- check the collector can read the database before installing the service ----------------
 say "Checking that $HERMES_USER can read the database (read-only)"
-if ! CHECK="$(sudo -u "$HERMES_USER" env HMC_DB="$DB" python3 "$PREFIX/collector/collector.py" --once 2>&1)"; then
+if [[ -n $HERMES_DATA ]]; then
+  # Same read-only view the service gets, set up by systemd for a one-off run.
+  command -v systemd-run >/dev/null || die "systemd-run is required for --hermes-data"
+  CHECK_VIEW=/run/$APP-check/hermes
+  check() {
+    systemd-run --quiet --wait --pipe --collect --uid="$HERMES_USER" \
+      -p RuntimeDirectory=$APP-check -p "BindReadOnlyPaths=$HERMES_DATA:$CHECK_VIEW" \
+      -p ProtectSystem=strict -p ProtectHome=read-only -p PrivateTmp=yes \
+      --setenv=HMC_DB="$CHECK_VIEW/state.db" /usr/bin/python3 "$PREFIX/collector/collector.py" --once
+  }
+else
+  check() { sudo -u "$HERMES_USER" env HMC_DB="$DB" python3 "$PREFIX/collector/collector.py" --once; }
+fi
+if ! CHECK="$(check 2>&1)"; then
   echo "$CHECK" | tail -n 5 >&2; die "the collector check failed"
 fi
 echo "$CHECK" | python3 -c '
@@ -228,7 +275,9 @@ ExecStart=/usr/bin/python3 $PREFIX/collector/collector.py
 Restart=always
 RestartSec=5
 # Read-only view of the whole filesystem, Hermes's files included.
-ProtectSystem=strict
+${HERMES_DATA:+RuntimeDirectory=$APP-collector
+BindReadOnlyPaths=$HERMES_DATA:$DATA_VIEW
+}ProtectSystem=strict
 ProtectHome=read-only
 PrivateTmp=true
 PrivateDevices=true

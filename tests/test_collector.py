@@ -245,6 +245,45 @@ class GatewayProcessTest(unittest.TestCase):
             self.assertIn("isn't running", warnings(db, Context(now))[0]["text"])
 
 
+    def test_gateway_in_a_container(self):
+        """Hermes in Docker: the heartbeat has the container's hostname and the pid
+        inside the container; the host sees another pid. Show one gateway, not two."""
+        import time
+        from unittest import mock
+        from tabs import Context
+        from tabs import overview
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        path = os.path.join(tmp.name, "state.db")
+        conn = sqlite3.connect(path)
+        with open(fake_hermes.SCHEMA) as f:
+            conn.executescript(f.read())
+        now = time.time()
+        started = now - 3000
+        # Current run (idle, stale heartbeat) and a run from before a container restart,
+        # which had the same inner pid.
+        conn.execute("INSERT INTO gateway_heartbeats VALUES ('a', 7, ?, ?, '', 'f3c9a1b2d4e5')",
+                     (started + 2, now - 1200))
+        conn.execute("INSERT INTO gateway_heartbeats VALUES ('b', 7, ?, ?, '', '0a1b2c3d4e5f')",
+                     (now - 9000, now - 3100))
+        conn.commit()
+        conn.close()
+        scan = {176167: {"start": started, "inner_pid": 7}}
+        with mock.patch.object(overview, "scan_gateways", return_value=scan), HermesDB(path) as db:
+            rows = overview.gateways(db, Context(now))
+            alive = [g for g in rows if g["alive"]]
+            self.assertEqual(len(alive), 1)
+            self.assertEqual(alive[0]["pid"], 176167)
+            self.assertEqual(alive[0]["uptime_s"], 3000)
+            self.assertEqual(overview.warnings(db, Context(now)), [])
+        with mock.patch.object(overview, "scan_gateways", return_value={}), HermesDB(path) as db:
+            self.assertFalse(any(g["alive"] for g in overview.gateways(db, Context(now))))
+
+    def test_inner_pid_outside_a_container(self):
+        from tabs.overview import _inner_pid
+        self.assertIsNone(_inner_pid(os.getpid()))
+
+
 class IdleLoopTest(unittest.TestCase):
     """The collector reads often only while a dashboard is open (simulated clock)."""
 
