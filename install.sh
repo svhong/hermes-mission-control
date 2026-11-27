@@ -14,7 +14,6 @@
 #                        folder and runs as its owner (override with --hermes-user).
 #   --port N             dashboard port (default 8788; garage-monitor uses 8787)
 #   --numbers-only       don't send titles, activity or task goals, only numbers
-#   --garage-url URL     link to your garage-monitor dashboard, e.g. http://hermes-box:8787
 #   --https              also serve over HTTPS on port 8443 via "tailscale serve"
 #
 # Two services are installed:
@@ -44,7 +43,6 @@ HERMES_DATA=""
 DATA_SET=0
 PORT=""
 SHOW_TEXT=""
-GARAGE_URL=""
 SET_PASSWORD=0
 HTTPS=""
 
@@ -59,10 +57,10 @@ while [[ $# -gt 0 ]]; do
     --hermes-data)  HERMES_DATA="${2:?--hermes-data needs a folder}"; DATA_SET=1; shift ;;
     --port)         PORT="${2:?--port needs a number}"; shift ;;
     --numbers-only) SHOW_TEXT=0 ;;
-    --garage-url)   GARAGE_URL="${2:?--garage-url needs a URL}"; shift ;;
+    --garage-url)   echo "note: --garage-url is no longer used; machine health is now on the dashboard itself"; shift ;;
     --set-password) SET_PASSWORD=1 ;;
     --https)        HTTPS=1 ;;
-    -h|--help)      sed -n '2,28p' "$0"; exit 0 ;;
+    -h|--help)      sed -n '2,27p' "$0"; exit 0 ;;
     *)              die "unknown option: $1 (try --help)" ;;
   esac
   shift
@@ -96,7 +94,6 @@ old() { [[ -f $1 ]] && sed -n "s/^$2=//p" "$1" || true; }
 TOKEN="$(old $CONF/hub.env HMC_TOKEN)"
 PW_HASH="$(old $CONF/hub.env HMC_VIEW_PASSWORD_HASH)"
 [[ -n $PORT ]]       || PORT="$(old $CONF/hub.env HMC_PORT)"
-[[ -n $GARAGE_URL ]] || GARAGE_URL="$(old $CONF/hub.env HMC_GARAGE_URL)"
 [[ -n $HTTPS ]]      || HTTPS="$(old $CONF/hub.env HMC_HTTPS)"
 # --db switches back from --hermes-data; otherwise keep whichever was used before.
 [[ $DB_SET -eq 1 || $DATA_SET -eq 1 ]] || HERMES_DATA="$(old $CONF/collector.env HMC_HERMES_DATA)"
@@ -185,7 +182,6 @@ HMC_BIND=$TS_IP,127.0.0.1
 HMC_PORT=$PORT
 HMC_TOKEN=$TOKEN
 HMC_VIEW_PASSWORD_HASH=$PW_HASH
-HMC_GARAGE_URL=$GARAGE_URL
 HMC_HTTPS=$HTTPS
 EOF
 chgrp "$SVC_USER" "$CONF/hub.env"

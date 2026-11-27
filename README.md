@@ -5,8 +5,10 @@ Hermes is doing now, what it has spent, how its tools are doing, and the
 subagents it has delegated work to. It works on desktop and phone and is
 only reachable over Tailscale.
 
-Machine health (CPU, temperatures, disk…) stays in
-[garage-monitor](https://github.com/svhong/garage-monitor); the header links to it.
+At the top of every page, a panel shows the health of the machine Hermes runs
+on (hermes-box): CPU, memory, disk and temperature gauges with the last 15
+minutes, plus network, disk I/O, load, fan, battery and the Hermes
+container's own CPU, memory and out-of-memory kills.
 
 ```
  hermes-box
@@ -28,6 +30,16 @@ Machine health (CPU, temperatures, disk…) stays in
 Nothing to install beyond `python3`.
 
 ## What it shows
+
+**Machine health** (top of every page): CPU use (performance and efficiency
+cores separately on Intel hybrid CPUs), memory, disk space and CPU
+temperature as gauges, each with a 15-minute chart; SSD and RAM temperatures;
+network and disk throughput; load; fan speed; battery and charger; and, when
+Hermes runs in Docker, the container's CPU, memory against its limit,
+process count and out-of-memory kills. Everything is read from `/proc` and
+`/sys`, so it needs no extra package or permission, and it keeps working when
+Hermes's database can't be read. Readings turn amber or red as disks fill up
+or temperatures near the sensor's limit.
 
 **Overview**: gateway status and uptime; active conversations, working
 subagents and queued requests; today's spend, messages and tool calls; spend
@@ -75,7 +87,7 @@ writes one small file (the daily token ledger) once a minute.
 ```bash
 git clone https://github.com/svhong/hermes-mission-control.git
 cd hermes-mission-control
-sudo ./install.sh --garage-url http://hermes-box:8787
+sudo ./install.sh
 ```
 
 The installer:
@@ -97,7 +109,6 @@ To update after a `git pull`, run `sudo ./install.sh` again. Settings are kept.
 |---|---|
 | `--set-password` | change the viewer password |
 | `--numbers-only` | don't send titles, activity or task goals |
-| `--garage-url URL` | "Machine health" link in the header |
 | `--hermes-data DIR` | Hermes runs in Docker: its data folder on this machine (see below) |
 | `--https` | also serve on `https://<machine>.<tailnet>.ts.net:8443` via `tailscale serve` |
 | `--port N` | dashboard port (default 8788) |

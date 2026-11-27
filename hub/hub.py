@@ -11,7 +11,6 @@ Settings (see /etc/hermes-mission-control/hub.env):
   HMC_VIEW_PASSWORD_HASH   if set, viewers must log in
                            (create with: python3 hub/hub.py --hash-password)
   HMC_SESSION_HOURS        how long a login lasts (default 168 = 7 days)
-  HMC_GARAGE_URL           optional link to your garage-monitor dashboard
   STATE_DIRECTORY          where to keep the daily token ledger (set by systemd);
                            without it the ledger lives in memory only
 """
@@ -33,7 +32,6 @@ PORT = int(os.environ.get("HMC_PORT", "8788"))
 TOKEN = os.environ.get("HMC_TOKEN", "")
 PASSWORD_HASH = os.environ.get("HMC_VIEW_PASSWORD_HASH", "").strip()
 SESSION_S = float(os.environ.get("HMC_SESSION_HOURS", "168")) * 3600
-GARAGE_URL = os.environ.get("HMC_GARAGE_URL", "").strip()
 
 MAX_BODY = 4 * 1024 * 1024   # largest report accepted
 FORGET_AFTER_S = 7 * 86400   # drop sources silent for a week
@@ -239,7 +237,7 @@ def snapshot():
             if tid not in tabs and tab_has_renderer(tid):
                 tabs[tid] = {"id": tid, "title": str(t.get("title") or tid)[:40], "order": t.get("order", 100)}
     tab_list = sorted(tabs.values(), key=lambda t: (t["order"] if isinstance(t["order"], (int, float)) else 100, t["id"]))
-    return {"now": now, "sources": items, "tabs": tab_list, "garage_url": GARAGE_URL, "ui_version": UI_VERSION}
+    return {"now": now, "sources": items, "tabs": tab_list, "ui_version": UI_VERSION}
 
 
 # ---- HTTP -----------------------------------------------------------------------------

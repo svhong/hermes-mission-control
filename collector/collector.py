@@ -29,6 +29,7 @@ import urllib.request
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from hermes_db import HermesDB  # noqa: E402
+from machine import Machine  # noqa: E402
 from tabs import Context, discover  # noqa: E402
 
 HUB_URL = os.environ.get("HMC_HUB_URL", "http://127.0.0.1:8788").rstrip("/")
@@ -48,6 +49,7 @@ class Collector:
         self.show_text = show_text
         self.tabs = discover()
         self.cache = {}  # tab id -> (collected_at, data)
+        self.machine = Machine(gateway_pids=_gateway_pids)
 
     def report(self, force=False):
         ctx = Context(show_text=self.show_text)
@@ -82,8 +84,20 @@ class Collector:
         except Exception as e:  # noqa: BLE001 - shown on the dashboard
             out["db"]["error"] = "%s: %s" % (type(e).__name__, e)
         out["tabs"] = [dict(m.TAB) for m in self.tabs]
+        # The machine's health doesn't depend on Hermes's database.
+        t0 = time.monotonic()
+        try:
+            out["machine"] = self.machine.sample(ctx.now)
+            out["machine"]["_ms"] = round((time.monotonic() - t0) * 1000, 1)
+        except Exception as e:  # noqa: BLE001 - shown on the dashboard
+            out["machine"] = {"_error": "%s: %s" % (type(e).__name__, e)}
         out["collect_ms"] = round((time.monotonic() - started) * 1000, 1)
         return out
+
+
+def _gateway_pids():
+    from tabs.overview import scan_gateways
+    return (scan_gateways() or {}).keys()
 
 
 def _watching(resp):
@@ -151,6 +165,8 @@ def run(collect, send, check, sleep=time.sleep, clock=time.monotonic, cycles=Non
 def main():
     collector = Collector()
     if "--once" in sys.argv:
+        collector.machine.sample()
+        time.sleep(1)  # so CPU, network and disk rates have something to compare against
         print(json.dumps(collector.report(force=True), indent=2, default=str))
         return
     if not TOKEN:

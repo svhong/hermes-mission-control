@@ -404,3 +404,53 @@ class HelpersTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class MachineTest(unittest.TestCase):
+    """Health of the machine Hermes runs on (collector/machine.py)."""
+
+    def test_two_samples_give_rates_and_history(self):
+        import time
+        from machine import Machine
+        m = Machine()
+        first = m.sample()
+        self.assertIsNone(first["cpu"]["percent"])  # nothing to compare against yet
+        time.sleep(0.3)
+        second = m.sample()
+        self.assertIsNotNone(second["cpu"]["percent"])
+        self.assertTrue(0 <= second["cpu"]["percent"] <= 100)
+        self.assertGreater(second["mem"]["total"], 0)
+        self.assertEqual(len(second["net"]), 2)
+        self.assertEqual(len(second["history"]), 2)
+        json.dumps(second)  # JSON-safe
+
+    def test_history_keeps_fifteen_minutes(self):
+        from machine import Machine, HISTORY_S
+        m = Machine()
+        for t in range(0, HISTORY_S + 600, 60):
+            out = m.sample(now=1_700_000_000 + t)
+        self.assertLessEqual(out["history"][-1][0] - out["history"][0][0], HISTORY_S)
+
+    def test_container_cgroup(self):
+        from machine import cgroup_stats, container_id
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        cg = os.path.join(tmp.name, "system.slice", "docker-3f2a9c1b7d4e0011223344556677889900aabbccddeeff.scope")
+        os.makedirs(cg)
+        for name, text in (("cpu.stat", "usage_usec 5000000\nuser_usec 4000000\n"),
+                           ("memory.current", "812000000\n"), ("memory.max", "max\n"),
+                           ("memory.events", "low 0\nhigh 0\nmax 0\noom 1\noom_kill 1\n"),
+                           ("pids.current", "23\n")):
+            with open(os.path.join(cg, name), "w") as f:
+                f.write(text)
+        self.assertEqual(container_id(cg), "3f2a9c1b7d4e")
+        self.assertEqual(cgroup_stats(cg), {"cpu_usec": 5000000, "mem": 812000000, "mem_limit": None,
+                                            "oom_kills": 1, "pids": 23})
+        self.assertIsNone(container_id("/sys/fs/cgroup/user.slice/user-1000.slice"))
+
+    def test_machine_reported_without_hermes_database(self):
+        c = Collector(db_path="/nonexistent/state.db")
+        r = c.report()
+        self.assertFalse(r["db"]["ok"])
+        self.assertIn("cpu", r["machine"])
+        self.assertIn("_ms", r["machine"])
