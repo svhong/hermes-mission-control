@@ -1,30 +1,34 @@
-# Hermes + Mission Control in containers.
+# Nova (a Hermes agent) + Mission Control in containers.
 #
-#   ./docker/setup.sh          first time: writes .env (token, password, Hermes data folder)
-#   docker compose up -d       start everything
-#   docker compose ps          what's running and healthy
-#   docker compose logs -f hmc-collector
+#   ./docker/setup.sh                    first time: writes .env (token, password)
+#   docker compose run --rm nova setup   first time: set up Nova (model, API keys, chat platforms)
+#   docker compose up -d                 start everything
+#   docker compose ps                    what's running and healthy
+#   docker compose logs -f nova
 #
 # Services:
-#   hermes         the Hermes agent's messaging gateway (official image, built from source)
-#   hmc-hub        the dashboard, published on HMC_PUBLISH (localhost by default; setup.sh
-#                  puts it on your tailnet with "tailscale serve")
-#   hmc-collector  reads Hermes's database read-only and reports to the hub. Shares the
-#                  hermes container's process list so it can see whether the gateway runs.
-#   hmc-docker     the container monitor: state, health, restarts, CPU, memory of every
-#                  container, read through docker-proxy
-#   docker-proxy   read-only window onto the Docker API (containers + version, GET only),
-#                  so nothing else gets the Docker socket
+#   nova            the agent: Hermes's messaging gateway (official nousresearch/hermes-agent image).
+#                   Its data (config, keys, conversations, cron jobs) is in the nova-data volume.
+#   nova-collector  reads Nova's database read-only and reports to the hub. Shares the nova
+#                   container's process list so it can see whether the gateway runs.
+#   hmc-hub         the dashboard, published on HMC_PUBLISH (localhost by default; setup.sh
+#                   puts it on your tailnet with "tailscale serve")
+#   hmc-docker      the container monitor: state, health, restarts, CPU, memory of every
+#                   container, read through docker-proxy
+#   docker-proxy    read-only window onto the Docker API (containers + version, GET only),
+#                   so nothing else gets the Docker socket
 #
 # Networks:
-#   agents      Hermes's own network, with internet access (LLM APIs, Telegram, ...)
+#   agents      the agents' network, with internet access (LLM APIs, Telegram, ...)
 #   hmc         hub <-> collectors, internal: no internet
 #   docker-api  monitor <-> proxy, internal: no internet
 #   edge        only for publishing the hub's port
 #
-# A second agent: copy the hermes + hmc-collector blocks under new names (e.g. hermes-work,
-# hmc-collector-work), give them their own HERMES_DATA folder, and set
-# HMC_SOURCE / the hmc.source label to a new name. The dashboard gets an agent picker.
+# Another agent: copy the nova + nova-collector blocks under a new name (say "atlas"),
+# change every "nova" in them to "atlas" (container names, hostname, pid: "service:atlas",
+# HMC_SOURCE, the hmc.source labels, the atlas-data volume), and add atlas-data under
+# volumes: at the bottom. Then: docker compose run --rm atlas setup && docker compose up -d.
+# The dashboard gets an agent picker, and the Containers tab groups its containers.
 
 name: hermes-mission-control
 
@@ -40,27 +44,29 @@ x-hardened: &hardened
   logging: *logging
 
 services:
-  hermes:
-    image: ${HERMES_IMAGE:-hermes-agent:local}
-    build:
-      context: https://github.com/NousResearch/hermes-agent.git#${HERMES_REF:-main}
+  nova:
+    image: ${HERMES_IMAGE:-nousresearch/hermes-agent:latest}
+    container_name: nova
     command: ["gateway", "run"]
-    hostname: ${HERMES_HOSTNAME:-hermes}
+    hostname: nova
     restart: unless-stopped
+    # The image starts as root, sets up /opt/data, then runs Hermes as its own
+    # "hermes" user (uid 10000 unless HERMES_UID says otherwise).
     environment:
       HERMES_UID: ${HERMES_UID:-10000}
       HERMES_GID: ${HERMES_GID:-10000}
     volumes:
-      - ${HERMES_DATA:-./data/hermes}:/opt/data
+      - ${NOVA_DATA:-nova-data}:/opt/data
     networks: [agents]
     labels:
-      hmc.source: ${HMC_SOURCE:-hermes}
+      hmc.source: nova
       hmc.role: agent
     logging: *logging
 
   hmc-hub:
     image: hermes-mission-control:local
     build: .
+    container_name: hmc-hub
     command: ["python3", "/app/hub/hub.py"]
     restart: unless-stopped
     environment:
@@ -84,30 +90,32 @@ services:
       hmc.role: hub
     <<: *hardened
 
-  hmc-collector:
+  nova-collector:
     image: hermes-mission-control:local
     build: .
+    container_name: nova-collector
     command: ["python3", "/app/collector/collector.py"]
     restart: unless-stopped
-    # Hermes's user: the only one that can read its files.
+    # Hermes's user inside the nova container: the only one that can read its files,
+    # and the owner of the gateway process.
     user: "${HERMES_UID:-10000}:${HERMES_GID:-10000}"
-    # See the hermes container's processes (to tell whether the gateway runs) and
+    # See the nova container's processes (to tell whether the gateway runs) and
     # use the same host name, so Hermes's heartbeat rows count as "this machine".
-    pid: "service:hermes"
-    hostname: ${HERMES_HOSTNAME:-hermes}
+    pid: "service:nova"
+    hostname: nova
     environment:
       HMC_HUB_URL: http://hmc-hub:8788
       HMC_TOKEN: ${HMC_TOKEN:?run ./docker/setup.sh first}
       HMC_DB: /hermes/state.db
-      HMC_SOURCE: ${HMC_SOURCE:-hermes}
+      HMC_SOURCE: nova
       HMC_INTERVAL: "5"
       HMC_IDLE_INTERVAL: ${HMC_IDLE_INTERVAL:-60}
       HMC_SHOW_TEXT: ${HMC_SHOW_TEXT:-1}
       HMC_HEALTH_FILE: /tmp/hmc-ok
     volumes:
-      - ${HERMES_DATA:-./data/hermes}:/hermes:ro
+      - ${NOVA_DATA:-nova-data}:/hermes:ro
     networks: [hmc]
-    depends_on: [hermes, hmc-hub]
+    depends_on: [nova, hmc-hub]
     healthcheck:
       test: ["CMD", "python3", "/app/docker/healthcheck.py", "file", "/tmp/hmc-ok", "180"]
       interval: 30s
@@ -116,13 +124,14 @@ services:
     mem_limit: 192m
     cpus: 0.5
     labels:
-      hmc.source: ${HMC_SOURCE:-hermes}
+      hmc.source: nova
       hmc.role: collector
     <<: *hardened
 
   hmc-docker:
     image: hermes-mission-control:local
     build: .
+    container_name: hmc-docker
     command: ["python3", "/app/collector/docker_monitor.py"]
     restart: unless-stopped
     environment:
@@ -151,6 +160,7 @@ services:
 
   docker-proxy:
     image: tecnativa/docker-socket-proxy:3.4
+    container_name: hmc-docker-proxy
     restart: unless-stopped
     environment:
       CONTAINERS: "1"   # list/inspect/stats containers
@@ -172,6 +182,7 @@ services:
 
 volumes:
   hmc-data:
+  nova-data:
 
 networks:
   agents: {}

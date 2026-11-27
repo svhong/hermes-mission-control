@@ -6,8 +6,6 @@
 #   sudo ./docker/setup.sh --set-password  choose a new viewer password
 #
 # Options:
-#   --hermes-user NAME   use NAME's existing ~/.hermes as Hermes's data (default: hermes, if it exists)
-#   --data PATH          Hermes data folder (default: that ~/.hermes, else ./data/hermes)
 #   --port N             dashboard port (default 8788)
 #   --no-tailscale       don't run "tailscale serve"; the dashboard stays on localhost
 #                        unless you set HMC_PUBLISH in .env
@@ -22,7 +20,7 @@ ENV_FILE="$ROOT/.env"
 OLD_CONF=/etc/hermes-mission-control
 HTTPS_PORT=8443
 
-HERMES_USER=""; DATA=""; PORT=""; TAILSCALE=1; HTTPS=0; UP=0; SET_PASSWORD=0
+PORT=""; TAILSCALE=1; HTTPS=0; UP=0; SET_PASSWORD=0
 
 die() { echo "error: $*" >&2; exit 1; }
 say() { echo "==> $*"; }
@@ -30,14 +28,12 @@ warn() { echo "!!  $*" >&2; }
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --hermes-user)  HERMES_USER="${2:?--hermes-user needs a name}"; shift ;;
-    --data)         DATA="${2:?--data needs a path}"; shift ;;
     --port)         PORT="${2:?--port needs a number}"; shift ;;
     --no-tailscale) TAILSCALE=0 ;;
     --https)        HTTPS=1 ;;
     --up)           UP=1 ;;
     --set-password) SET_PASSWORD=1 ;;
-    -h|--help)      sed -n '2,19p' "$0"; exit 0 ;;
+    -h|--help)      sed -n '2,17p' "$0"; exit 0 ;;
     *)              die "unknown option: $1 (try --help)" ;;
   esac
   shift
@@ -55,41 +51,14 @@ TOKEN="$(get "$ENV_FILE" HMC_TOKEN)"
 PW_HASH="$(get "$ENV_FILE" HMC_VIEW_PASSWORD_HASH)"
 GARAGE_URL="$(get "$ENV_FILE" HMC_GARAGE_URL)"
 PUBLISH="$(get "$ENV_FILE" HMC_PUBLISH)"
-CUR_DATA="$(get "$ENV_FILE" HERMES_DATA)"
 
 if [[ -f $OLD_CONF/hub.env ]]; then
   say "Found a systemd install of Mission Control; carrying over its token, password and settings"
   [[ -n $TOKEN ]]      || TOKEN="$(get $OLD_CONF/hub.env HMC_TOKEN)"
   [[ -n $PW_HASH ]]    || PW_HASH="$(get $OLD_CONF/hub.env HMC_VIEW_PASSWORD_HASH)"
   [[ -n $GARAGE_URL ]] || GARAGE_URL="$(get $OLD_CONF/hub.env HMC_GARAGE_URL)"
-  [[ -n $DATA || $CUR_DATA != "./data/hermes" ]] || DATA="$(dirname "$(get $OLD_CONF/collector.env HMC_DB)")"
-  [[ -n $HERMES_USER ]] || HERMES_USER="$(get $OLD_CONF/collector.env HMC_HERMES_USER)"
 fi
 [[ -n $TOKEN ]] || TOKEN="$(python3 -c 'import secrets; print(secrets.token_urlsafe(24))')"
-
-# --- Hermes's data folder ---------------------------------------------------------------
-if [[ -z $DATA ]]; then
-  if [[ -n $CUR_DATA && $CUR_DATA != "./data/hermes" ]]; then
-    DATA="$CUR_DATA"
-  else
-    HERMES_USER="${HERMES_USER:-hermes}"
-    if id "$HERMES_USER" &>/dev/null; then
-      HOME_DIR="$(getent passwd "$HERMES_USER" | cut -d: -f6)"
-      [[ -d $HOME_DIR/.hermes ]] && DATA="$HOME_DIR/.hermes"
-    fi
-  fi
-fi
-DATA="${DATA:-./data/hermes}"
-ABS_DATA="$DATA"; [[ $ABS_DATA == /* ]] || ABS_DATA="$ROOT/${DATA#./}"
-if [[ ! -d $ABS_DATA ]]; then
-  say "Creating an empty Hermes data folder at $ABS_DATA (run 'docker compose run --rm hermes setup' to configure Hermes)"
-  mkdir -p "$ABS_DATA"
-  chown 10000:10000 "$ABS_DATA" 2>/dev/null || warn "couldn't chown $ABS_DATA to 10000; run with sudo"
-fi
-UID_="$(stat -c %u "$ABS_DATA")"; GID_="$(stat -c %g "$ABS_DATA")"
-[[ $UID_ != 0 ]] || die "$ABS_DATA is owned by root; Hermes must not run as root. chown it to the Hermes user."
-say "Hermes data: $ABS_DATA (owner uid $UID_, gid $GID_)"
-[[ -f $ABS_DATA/state.db ]] && say "  existing Hermes database found; conversations, cron jobs and settings carry over"
 
 # --- viewer password ------------------------------------------------------------------------
 if [[ $SET_PASSWORD -eq 1 || ( -z $PW_HASH && -t 0 ) ]]; then
@@ -136,9 +105,6 @@ set_var HMC_TOKEN "$TOKEN"
 set_var HMC_VIEW_PASSWORD_HASH "$PW_HASH"
 set_var HMC_GARAGE_URL "$GARAGE_URL"
 set_var HMC_PUBLISH "$PUBLISH"
-set_var HERMES_DATA "$DATA"
-set_var HERMES_UID "$UID_"
-set_var HERMES_GID "$GID_"
 chmod 600 "$ENV_FILE"
 say "Wrote $ENV_FILE"
 
@@ -185,8 +151,14 @@ fi
 if [[ $UP -eq 1 ]]; then
   [[ $CLASH -eq 0 ]] || die "not starting: fix the problems above first"
   cd "$ROOT"
-  say "Building images (Hermes is built from source the first time; this takes a few minutes)"
+  say "Building Mission Control and pulling Hermes"
   docker compose build
+  docker compose pull nova docker-proxy
+  # First run: Nova's data volume doesn't exist yet, so run Hermes's setup wizard.
+  if [[ -t 0 ]] && ! docker volume inspect hermes-mission-control_nova-data >/dev/null 2>&1; then
+    say "Nova isn't set up yet: starting Hermes's setup wizard"
+    docker compose run --rm --no-deps nova setup
+  fi
   docker compose up -d
   sleep 5
   docker compose ps
@@ -194,9 +166,10 @@ fi
 
 echo
 echo "Next:"
-[[ $UP -eq 1 ]] || echo "  docker compose up -d --build      # start (first build of Hermes takes a few minutes)"
-echo "  docker compose ps                 # status and health of each container"
-echo "  docker compose logs -f hermes     # Hermes's own logs"
+[[ $UP -eq 1 ]] || echo "  docker compose run --rm nova setup   # first time: Nova's model, API keys, chat platforms"
+[[ $UP -eq 1 ]] || echo "  docker compose up -d --build         # start everything"
+echo "  docker compose ps                    # status and health of each container"
+echo "  docker compose logs -f nova          # Nova's own logs"
 echo
 echo "Dashboard:"
 [[ -n $TS_NAME ]] && echo "  http://${TS_NAME%%.*}:$PORT   (from any device on your tailnet)"

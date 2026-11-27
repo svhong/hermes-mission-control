@@ -4,7 +4,7 @@
 #
 # Then open http://127.0.0.1:8788. Its data lives in the "fake-hermes" volume.
 services:
-  hermes:
+  nova:
     image: hermes-mission-control-fake-hermes:local
     build:
       context: .
@@ -13,7 +13,7 @@ services:
     environment: !reset {}
     volumes: !override
       - fake-hermes:/opt/data
-  hmc-collector:
+  nova-collector:
     user: "10000:10000"
     volumes: !override
       - fake-hermes:/hermes:ro
