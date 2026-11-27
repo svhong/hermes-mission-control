@@ -64,6 +64,19 @@ class HubTest(unittest.TestCase):
         # Only tabs with a renderer in static/tabs are offered.
         self.assertEqual([t["id"] for t in state["tabs"]], ["overview"])
 
+    def test_global_tabs_and_source_kinds(self):
+        self.addCleanup(lambda: hub.sources.pop("docker", None))
+        token = self.login()
+        self.call("/api/report", {"source": "docker", "kind": "docker",
+                                  "tabs": [{"id": "containers", "title": "Containers", "order": 40, "global": True}],
+                                  "data": {"containers": {}}}, {"X-HMC-Token": "test-token"})
+        state = json.loads(self.call("/api/state", headers={"Authorization": "Bearer " + token})[1])
+        tab = next(t for t in state["tabs"] if t["id"] == "containers")
+        self.assertTrue(tab["global"])
+        kinds = {s["id"]: s["kind"] for s in state["sources"]}
+        self.assertEqual(kinds["docker"], "docker")
+        self.assertEqual(kinds.get("hermes", "hermes"), "hermes")  # reports without a kind are agents
+
     def test_watching_signal(self):
         hub.viewers["last"] = 0.0
         report = {"source": "hermes", "tabs": [], "data": {}}

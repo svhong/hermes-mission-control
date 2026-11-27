@@ -228,16 +228,20 @@ def snapshot():
     with lock:
         for sid in [s for s, e in sources.items() if now - e["received"] > FORGET_AFTER_S]:
             del sources[sid]
-        items = [{"id": sid, "age_s": round(now - e["received"], 1), "report": e["report"],
+        items = [{"id": sid, "kind": str(e["report"].get("kind") or "hermes")[:32],
+                  "age_s": round(now - e["received"], 1), "report": e["report"],
                   "ledger": ledger.view(sid)}
                  for sid, e in sorted(sources.items())]
     # Tabs = every tab any source reports that has a renderer, in order.
+    # A "global" tab (e.g. Containers) isn't about one agent: the dashboard shows
+    # it from whichever source reports it, whatever agent is picked.
     tabs = {}
     for s in items:
         for t in s["report"].get("tabs") or []:
             tid = str(t.get("id", ""))
             if tid not in tabs and tab_has_renderer(tid):
-                tabs[tid] = {"id": tid, "title": str(t.get("title") or tid)[:40], "order": t.get("order", 100)}
+                tabs[tid] = {"id": tid, "title": str(t.get("title") or tid)[:40], "order": t.get("order", 100),
+                             "global": bool(t.get("global"))}
     tab_list = sorted(tabs.values(), key=lambda t: (t["order"] if isinstance(t["order"], (int, float)) else 100, t["id"]))
     return {"now": now, "sources": items, "tabs": tab_list, "garage_url": GARAGE_URL, "ui_version": UI_VERSION}
 

@@ -1,0 +1,22 @@
+# Try the whole stack without a real Hermes: a fake, busy Hermes instead.
+#
+#   HMC_TOKEN=dev docker compose -f docker-compose.yml -f docker-compose.fake.yml up -d --build
+#
+# Then open http://127.0.0.1:8788. Its data lives in the "fake-hermes" volume.
+services:
+  hermes:
+    image: hermes-mission-control-fake-hermes:local
+    build:
+      context: .
+      dockerfile: docker/fake-hermes.Dockerfile
+    command: !reset null
+    environment: !reset {}
+    volumes: !override
+      - fake-hermes:/opt/data
+  hmc-collector:
+    user: "10000:10000"
+    volumes: !override
+      - fake-hermes:/hermes:ro
+
+volumes:
+  fake-hermes:

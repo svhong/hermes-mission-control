@@ -66,10 +66,31 @@ function currentTab() {
   return tabs.find(t => t.id === id) ? id : tabs[0]?.id;
 }
 
-function currentSource() {
+// Agents are the Hermes installs; other sources (the container monitor) only
+// feed "global" tabs and don't appear in the agent picker.
+function agentSources() {
   const sources = state?.sources || [];
+  return sources.filter(s => (s.kind || 'hermes') === 'hermes');
+}
+
+function currentSource() {
+  const sources = agentSources();
   const want = store.get('hmc_source');
   return sources.find(s => s.id === want) || sources[0] || null;
+}
+
+function tabMeta(id) {
+  return (state?.tabs || []).find(t => t.id === id) || null;
+}
+
+// The source a global tab reads from: the first one that reports it.
+function globalSource(tabId) {
+  return (state?.sources || []).find(s => s.report.data?.[tabId]) || null;
+}
+
+function isStale(source) {
+  const allowed = Math.max(30, (source.report.interval_s || 5) * 2 + 15);
+  return source.age_s > allowed;
 }
 
 window.addEventListener('hashchange', () => render());
@@ -87,27 +108,39 @@ function renderTabs(active) {
 
 function renderTop(source) {
   const status = $('top-status');
-  if (!source) { status.replaceChildren(pill('unknown', 'No collector connected')); return; }
-  const r = source.report;
   const items = [];
-  // A source is stale if the collector hasn't reported for a while.
-  // The collector reports every few seconds while someone watches, about once a
-  // minute otherwise; only warn when it's well past its own schedule.
-  const allowed = Math.max(30, (r.interval_s || 5) * 2 + 15);
-  if (source.age_s > allowed) items.push(pill('stale', `Collector silent ${ago(state.now - source.age_s, state.now)}`));
-  else if (!r.db?.ok) items.push(pill('critical', 'Database unreadable'));
-  const gws = r.data?.overview?.gateways;
-  if (Array.isArray(gws)) {
-    const alive = gws.filter(g => g.alive);
-    items.push(alive.length ? pill('alive', `Gateway up ${ago(alive[0].started_at, state.now).replace(' ago', '')}`) : pill('stale', 'Gateway down'));
+  if (!source) items.push(pill('unknown', 'No collector connected'));
+  else {
+    const r = source.report;
+    // A source is stale if the collector hasn't reported for a while.
+    // The collector reports every few seconds while someone watches, about once a
+    // minute otherwise; only warn when it's well past its own schedule.
+    if (isStale(source)) items.push(pill('stale', `Collector silent ${ago(state.now - source.age_s, state.now)}`));
+    else if (!r.db?.ok) items.push(pill('critical', 'Database unreadable'));
+    const gws = r.data?.overview?.gateways;
+    if (Array.isArray(gws)) {
+      const alive = gws.filter(g => g.alive);
+      items.push(alive.length ? pill('alive', `Gateway up ${ago(alive[0].started_at, state.now).replace(' ago', '')}`) : pill('stale', 'Gateway down'));
+    }
+  }
+  const cs = globalSource('containers');
+  if (cs) {
+    const c = cs.report.data.containers;
+    const crit = (c.problems || []).filter(p => p.level === 'critical').length;
+    const link = node => el('a', { href: '#containers', class: 'pill-link' }, node);
+    if (isStale(cs)) items.push(link(pill('stale', 'Container monitor silent')));
+    else if (!c.engine?.ok) items.push(link(pill('critical', "Can't reach Docker")));
+    else if (crit) items.push(link(pill('critical', `${crit} container problem${crit === 1 ? '' : 's'}`)));
+    else if (c.summary) items.push(link(pill('alive', `${c.summary.running}/${c.summary.total} containers up`)));
   }
   status.replaceChildren(...items);
 
+  const agents = agentSources();
   const pick = $('source-pick');
   const sel = $('source-select');
-  pick.hidden = state.sources.length < 2;
+  pick.hidden = agents.length < 2 || !source;
   if (!pick.hidden) {
-    sel.replaceChildren(...state.sources.map(s => el('option', { value: s.id, text: s.id, selected: s.id === source.id })));
+    sel.replaceChildren(...agents.map(s => el('option', { value: s.id, text: s.id, selected: s.id === source.id })));
   }
   const g = $('garage-link');
   g.hidden = !state.garage_url;
@@ -116,6 +149,11 @@ function renderTop(source) {
 
 function renderFoot(source) {
   const r = source?.report;
+  if (r && r.kind === 'docker') {
+    const e = r.data?.containers?.engine || {};
+    $('foot').textContent = `${r.source} on ${r.host} · Docker ${e.version || '?'} via ${e.url || '?'} · collected in ${r.collect_ms} ms · updated ${ago(state.now - source.age_s, state.now)}`;
+    return;
+  }
   $('foot').textContent = r
     ? `${r.source} on ${r.host} · Hermes schema v${r.db?.schema_version ?? '?'} · collected in ${r.collect_ms} ms · updated ${ago(state.now - source.age_s, state.now)}${r.db?.immutable ? ' · Hermes not running (snapshot)' : ''}`
     : '';
@@ -124,16 +162,18 @@ function renderFoot(source) {
 async function render() {
   if (!state) return;
   const tabId = currentTab();
-  const source = currentSource();
+  const agent = currentSource();
+  const global = !!tabMeta(tabId)?.global;
+  const source = global ? (globalSource(tabId) || agent) : agent;
   renderTabs(tabId);
-  renderTop(source);
+  renderTop(agent);
   renderFoot(source);
   const main = $('main');
   if (!source) {
     main.replaceChildren(el('div', { class: 'empty', text: 'Waiting for the collector to send its first report…' }));
     return;
   }
-  if (source.report.db?.error) {
+  if (!global && source.report.db?.error) {
     main.replaceChildren(el('div', { class: 'error', text: "The collector can't read Hermes's database: " + source.report.db.error }));
     return;
   }
@@ -144,7 +184,7 @@ async function render() {
     const root = el('div', { class: 'tab-root' });
     if (!data) root.append(el('div', { class: 'empty', text: 'This source has no data for this tab.' }));
     else if (data._error) root.append(el('div', { class: 'error', text: 'This tab failed: ' + data._error }));
-    else modules[tabId].render(root, { data, source, ledger: source.ledger || {}, now: state.now, rerender: render });
+    else modules[tabId].render(root, { data, source, sources: state.sources, ledger: source.ledger || {}, now: state.now, rerender: render });
     hideTip();
     main.replaceChildren(root);
   } catch (err) {

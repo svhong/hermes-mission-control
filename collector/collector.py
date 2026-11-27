@@ -15,6 +15,8 @@ Settings (see /etc/hermes-mission-control/collector.env):
                   while idle it asks the hub every HMC_INTERVAL seconds whether
                   someone opened the dashboard (no database read for that)
   HMC_SHOW_TEXT   1 to include short titles, activity and task goals; 0 for numbers only
+  HMC_HEALTH_FILE optional file touched after every successful exchange with the hub
+                  (for container health checks: healthy while it stays fresh)
 
   collector.py --once   print one report as JSON and exit (for checking)
 """
@@ -38,6 +40,7 @@ SOURCE = os.environ.get("HMC_SOURCE", "hermes").strip() or "hermes"
 INTERVAL = max(1.0, float(os.environ.get("HMC_INTERVAL", "5")))
 IDLE_INTERVAL = max(INTERVAL, float(os.environ.get("HMC_IDLE_INTERVAL", "60")))
 SHOW_TEXT = os.environ.get("HMC_SHOW_TEXT", "1").strip() not in ("0", "false", "no", "")
+HEALTH_FILE = os.environ.get("HMC_HEALTH_FILE", "").strip()
 VERSION = "0.1.0"
 
 
@@ -110,6 +113,18 @@ def check_watching():
         return _watching(resp)
 
 
+def mark_healthy(path=None):
+    """Touch the health file so a container health check can tell the loop is alive."""
+    path = HEALTH_FILE if path is None else path
+    if not path:
+        return
+    try:
+        with open(path, "a"):
+            os.utime(path, None)
+    except OSError:
+        pass
+
+
 def run(collect, send, check, sleep=time.sleep, clock=time.monotonic, cycles=None, log=print):
     """Main loop. Reads every INTERVAL seconds while a dashboard is open and every
     IDLE_INTERVAL seconds otherwise; while idle, checks every INTERVAL seconds
@@ -133,10 +148,12 @@ def run(collect, send, check, sleep=time.sleep, clock=time.monotonic, cycles=Non
                     log("collector: %s" % ("dashboard open, reading every %gs" % INTERVAL if watching
                                            else "nobody watching, reading every %gs" % IDLE_INTERVAL), flush=True)
             elif check():
+                mark_healthy()
                 watching = True
                 last_sent = None  # someone just opened the dashboard: read now
                 log("collector: dashboard open, reading every %gs" % INTERVAL, flush=True)
                 continue
+            mark_healthy()
             if last_error:
                 log("collector: hub reachable again", flush=True)
             last_error = None

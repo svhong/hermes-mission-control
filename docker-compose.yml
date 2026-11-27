@@ -1,0 +1,182 @@
+# Hermes + Mission Control in containers.
+#
+#   ./docker/setup.sh          first time: writes .env (token, password, Hermes data folder)
+#   docker compose up -d       start everything
+#   docker compose ps          what's running and healthy
+#   docker compose logs -f hmc-collector
+#
+# Services:
+#   hermes         the Hermes agent's messaging gateway (official image, built from source)
+#   hmc-hub        the dashboard, published on HMC_PUBLISH (localhost by default; setup.sh
+#                  puts it on your tailnet with "tailscale serve")
+#   hmc-collector  reads Hermes's database read-only and reports to the hub. Shares the
+#                  hermes container's process list so it can see whether the gateway runs.
+#   hmc-docker     the container monitor: state, health, restarts, CPU, memory of every
+#                  container, read through docker-proxy
+#   docker-proxy   read-only window onto the Docker API (containers + version, GET only),
+#                  so nothing else gets the Docker socket
+#
+# Networks:
+#   agents      Hermes's own network, with internet access (LLM APIs, Telegram, ...)
+#   hmc         hub <-> collectors, internal: no internet
+#   docker-api  monitor <-> proxy, internal: no internet
+#   edge        only for publishing the hub's port
+#
+# A second agent: copy the hermes + hmc-collector blocks under new names (e.g. hermes-work,
+# hmc-collector-work), give them their own HERMES_DATA folder, and set
+# HMC_SOURCE / the hmc.source label to a new name. The dashboard gets an agent picker.
+
+name: hermes-mission-control
+
+x-logging: &logging
+  driver: json-file
+  options: { max-size: "10m", max-file: "3" }
+
+x-hardened: &hardened
+  read_only: true
+  tmpfs: [/tmp]
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+  logging: *logging
+
+services:
+  hermes:
+    image: ${HERMES_IMAGE:-hermes-agent:local}
+    build:
+      context: https://github.com/NousResearch/hermes-agent.git#${HERMES_REF:-main}
+    command: ["gateway", "run"]
+    hostname: ${HERMES_HOSTNAME:-hermes}
+    restart: unless-stopped
+    environment:
+      HERMES_UID: ${HERMES_UID:-10000}
+      HERMES_GID: ${HERMES_GID:-10000}
+    volumes:
+      - ${HERMES_DATA:-./data/hermes}:/opt/data
+    networks: [agents]
+    labels:
+      hmc.source: ${HMC_SOURCE:-hermes}
+      hmc.role: agent
+    logging: *logging
+
+  hmc-hub:
+    image: hermes-mission-control:local
+    build: .
+    command: ["python3", "/app/hub/hub.py"]
+    restart: unless-stopped
+    environment:
+      HMC_BIND: 0.0.0.0
+      HMC_PORT: "8788"
+      HMC_TOKEN: ${HMC_TOKEN:?run ./docker/setup.sh first}
+      HMC_VIEW_PASSWORD_HASH: ${HMC_VIEW_PASSWORD_HASH:-}
+      HMC_GARAGE_URL: ${HMC_GARAGE_URL:-}
+    volumes:
+      - hmc-data:/data
+    ports:
+      - "${HMC_PUBLISH:-127.0.0.1:8788}:8788"
+    networks: [hmc, edge]
+    healthcheck:
+      test: ["CMD", "python3", "/app/docker/healthcheck.py", "hub"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+    mem_limit: 128m
+    labels:
+      hmc.role: hub
+    <<: *hardened
+
+  hmc-collector:
+    image: hermes-mission-control:local
+    build: .
+    command: ["python3", "/app/collector/collector.py"]
+    restart: unless-stopped
+    # Hermes's user: the only one that can read its files.
+    user: "${HERMES_UID:-10000}:${HERMES_GID:-10000}"
+    # See the hermes container's processes (to tell whether the gateway runs) and
+    # use the same host name, so Hermes's heartbeat rows count as "this machine".
+    pid: "service:hermes"
+    hostname: ${HERMES_HOSTNAME:-hermes}
+    environment:
+      HMC_HUB_URL: http://hmc-hub:8788
+      HMC_TOKEN: ${HMC_TOKEN:?run ./docker/setup.sh first}
+      HMC_DB: /hermes/state.db
+      HMC_SOURCE: ${HMC_SOURCE:-hermes}
+      HMC_INTERVAL: "5"
+      HMC_IDLE_INTERVAL: ${HMC_IDLE_INTERVAL:-60}
+      HMC_SHOW_TEXT: ${HMC_SHOW_TEXT:-1}
+      HMC_HEALTH_FILE: /tmp/hmc-ok
+    volumes:
+      - ${HERMES_DATA:-./data/hermes}:/hermes:ro
+    networks: [hmc]
+    depends_on: [hermes, hmc-hub]
+    healthcheck:
+      test: ["CMD", "python3", "/app/docker/healthcheck.py", "file", "/tmp/hmc-ok", "180"]
+      interval: 30s
+      timeout: 5s
+      start_period: 30s
+    mem_limit: 192m
+    cpus: 0.5
+    labels:
+      hmc.source: ${HMC_SOURCE:-hermes}
+      hmc.role: collector
+    <<: *hardened
+
+  hmc-docker:
+    image: hermes-mission-control:local
+    build: .
+    command: ["python3", "/app/collector/docker_monitor.py"]
+    restart: unless-stopped
+    environment:
+      HMC_HUB_URL: http://hmc-hub:8788
+      HMC_TOKEN: ${HMC_TOKEN:?run ./docker/setup.sh first}
+      HMC_SOURCE: docker
+      HMC_DOCKER_URL: tcp://docker-proxy:2375
+      HMC_DOCKER_ALL: ${HMC_DOCKER_ALL:-1}
+      HMC_DOCKER_PROJECT: hermes-mission-control
+      HMC_INTERVAL: "5"
+      HMC_IDLE_INTERVAL: ${HMC_IDLE_INTERVAL:-60}
+      HMC_SHOW_TEXT: ${HMC_SHOW_TEXT:-1}
+      HMC_HEALTH_FILE: /tmp/hmc-ok
+    networks: [hmc, docker-api]
+    depends_on: [hmc-hub, docker-proxy]
+    healthcheck:
+      test: ["CMD", "python3", "/app/docker/healthcheck.py", "file", "/tmp/hmc-ok", "180"]
+      interval: 30s
+      timeout: 5s
+      start_period: 30s
+    mem_limit: 96m
+    cpus: 0.25
+    labels:
+      hmc.role: monitor
+    <<: *hardened
+
+  docker-proxy:
+    image: tecnativa/docker-socket-proxy:3.4
+    restart: unless-stopped
+    environment:
+      CONTAINERS: "1"   # list/inspect/stats containers
+      VERSION: "1"
+      PING: "1"
+      POST: "0"         # GET only: can't start, stop or change anything
+      EVENTS: "0"
+      DISABLE_IPV6: "1" # the internal network is IPv4 only
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks: [docker-api]
+    read_only: true
+    tmpfs: [/run, /tmp]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 64m
+    labels:
+      hmc.role: proxy
+    logging: *logging
+
+volumes:
+  hmc-data:
+
+networks:
+  agents: {}
+  hmc:
+    internal: true
+  docker-api:
+    internal: true
+  edge: {}

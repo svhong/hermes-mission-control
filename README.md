@@ -25,7 +25,9 @@ Machine health (CPU, temperatures, disk…) stays in
 - **dashboard** (`hub/static/`): plain HTML, CSS and JavaScript modules. No
   npm, no build step.
 
-Nothing to install beyond `python3`.
+Nothing to install beyond `python3`. It runs either as two systemd services
+next to Hermes ([Install on hermes-box](#install-on-hermes-box)) or, together
+with Hermes itself, as Docker containers ([Run in Docker](#run-in-docker)).
 
 ## What it shows
 
@@ -47,6 +49,13 @@ come from `~/.hermes/cron/jobs.json`, runs from the database.
 the subagents they delegated to (nested subagents included, running ones
 first, click a row for details); background delegations with their task and
 delivery state; resumable subagents.
+
+**Containers** (Docker setup): every container on the machine, grouped by
+the agent it belongs to: running/healthy/unhealthy/restarting, uptime,
+restarts (and restarts in the last hour), CPU and memory with a sparkline of
+recent readings and their limits, network rates and process count; problems
+such as failing health checks, crash loops, containers killed for memory or
+stopped with an error. The header shows a summary on every tab.
 
 ### Privacy
 
@@ -102,6 +111,105 @@ To update after a `git pull`, run `sudo ./install.sh` again. Settings are kept.
 | `--port N` | dashboard port (default 8788) |
 | `--uninstall` | remove everything (Hermes isn't touched) |
 
+## Run in Docker
+
+Runs Hermes and Mission Control as containers on hermes-box. Hermes keeps its
+data folder, so conversations, cron jobs, skills, `config.yaml` and its `.env`
+come along.
+
+```
+ hermes-box (Docker)
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ hermes ── internet (LLM APIs, Telegram…)                                    │
+│   │ /opt/data = ~hermes/.hermes                                             │
+│   │ (same process list)                                                     │
+│ hmc-collector (read-only) ──┐                                               │
+│                             ├──► hmc-hub ──► 127.0.0.1:8788 ──► tailscale    │
+│ hmc-docker ─────────────────┘                    serve ──► browser          │
+│   │                                                                         │
+│ docker-proxy (GET containers only) ── /var/run/docker.sock (read-only)      │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+| Container | What it does |
+|---|---|
+| `hermes` | Hermes's messaging gateway (`gateway run`), from the official Hermes Dockerfile, built from source |
+| `hmc-hub` | the dashboard |
+| `hmc-collector` | reads Hermes's database read-only as Hermes's user. Shares the `hermes` container's process list so it can see the gateway process; has no internet access |
+| `hmc-docker` | the container monitor (`collector/docker_monitor.py`): feeds the Containers tab |
+| `docker-proxy` | [docker-socket-proxy](https://github.com/Tecnativa/docker-socket-proxy): lets the monitor list and inspect containers and nothing else (GET only, no images, exec or secrets). Nothing else gets the Docker socket |
+
+Every Mission Control container runs with a read-only filesystem, no Linux
+capabilities, memory and CPU limits, and a health check, so `docker compose ps`
+and the Containers tab both show whether each one is healthy. Logs rotate at
+3 × 10 MB per container.
+
+### Move hermes-box over
+
+```bash
+git pull
+sudo ./docker/setup.sh
+```
+
+The script:
+
+1. Finds Hermes's data (`~hermes/.hermes`, or `--data PATH`) and uses its owner's
+   uid/gid for the Hermes and collector containers, so file permissions stay as they are.
+2. Carries over the token, viewer password and garage link from the systemd install.
+3. Writes `.env` (mode 600; see `.env.example` for every setting).
+4. Warns about anything that would clash: the systemd Mission Control services
+   (port 8788) and a Hermes gateway still running outside Docker. Two gateways
+   would answer the same chats twice, so stop the old one and disable whatever
+   starts it at boot.
+5. Puts the dashboard on your tailnet with `tailscale serve --tcp 8788`. The hub
+   container only listens on `127.0.0.1`, and `http://hermes-box:8788` keeps
+   working. Add `--https` for `https://hermes-box.<tailnet>.ts.net:8443`.
+
+Then, once the old services are stopped:
+
+```bash
+sudo ./install.sh --uninstall      # the systemd Mission Control (Hermes isn't touched)
+sudo ./docker/setup.sh             # again, now without warnings
+docker compose up -d --build       # first build of Hermes takes a few minutes
+docker compose ps
+```
+
+Back up `~hermes/.hermes` before the first start. Going back is
+`docker compose down` and starting Hermes and `./install.sh` the old way: the
+data folder is the same.
+
+| Task | Command |
+|---|---|
+| Status and health | `docker compose ps` |
+| Logs | `docker compose logs -f hermes` (or `hmc-collector`, `hmc-hub`, `hmc-docker`) |
+| Run a Hermes command | `docker compose exec hermes hermes <command>` (e.g. `doctor`) |
+| Update Mission Control | `git pull && docker compose up -d --build` |
+| Update Hermes | `docker compose build --pull hermes && docker compose up -d` (pin a release with `HERMES_REF` in `.env`) |
+| New viewer password | `sudo ./docker/setup.sh --set-password && docker compose up -d` |
+| What the collector sends | `docker compose exec hmc-collector python3 /app/collector/collector.py --once` |
+| What the monitor sees | `docker compose exec hmc-docker python3 /app/collector/docker_monitor.py --once` |
+| Stop everything | `docker compose down` (data stays) |
+
+Notes:
+- Hermes's tools now run inside its container. Anything Hermes used from the
+  host (other CLIs, files outside `~/.hermes`) must be added to the image or
+  mounted. Hermes's own image already includes git, Python, the
+  libraries for a headless browser, and the Docker CLI.
+- The Containers tab shows every container on the machine. Set `HMC_DOCKER_ALL=0`
+  to show only this stack's containers.
+- The container monitor also works without the rest of the Docker setup:
+  `HMC_DOCKER_URL=unix:///var/run/docker.sock python3 collector/docker_monitor.py`
+  with the usual `HMC_HUB_URL` / `HMC_TOKEN`. That needs read access to the
+  Docker socket, which is effectively root.
+
+### Try the Docker setup with a fake Hermes
+
+```bash
+HMC_TOKEN=dev docker compose -f docker-compose.yml -f docker-compose.fake.yml up -d --build
+```
+
+Open http://127.0.0.1:8788. `docker compose -f docker-compose.yml -f docker-compose.fake.yml down -v` removes it.
+
 ## Try it on any computer
 
 ```bash
@@ -142,8 +250,18 @@ The tab appears automatically. Ideas: skills, memory, hosted rooms
 
 Every report is tagged with a source name (`HMC_SOURCE`). Another Hermes
 install, on this machine or another, can run its own collector pointed at
-this hub (`HMC_HUB_URL`, `HMC_TOKEN`), and a source picker appears in the
+this hub (`HMC_HUB_URL`, `HMC_TOKEN`), and an agent picker appears in the
 header. Profiles inside one Hermes already show up on the Agents tab.
+
+With Docker, a second agent is two more services in `docker-compose.yml`: a
+copy of `hermes` and of `hmc-collector` with their own data folder,
+`pid: "service:<new hermes>"`, and a new name in `HMC_SOURCE` and the
+`hmc.source` label. The label groups its containers under that agent on
+the Containers tab.
+
+Sources come in kinds: `hermes` (an agent, listed in the picker) and
+`docker` (the container monitor). A tab whose `TAB` has `"global": True` is
+shown from whichever source reports it, whatever agent is picked.
 
 ## Troubleshooting
 

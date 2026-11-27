@@ -306,3 +306,18 @@ button.job-row:focus-visible { outline: 2px solid var(--accent); outline-offset:
 .job-row > span:first-child { align-items: flex-start; }
 .run-dot { width: 13px; height: 13px; font-size: 8px; }
 .run-dots { gap: 2px; }
+
+/* Containers tab */
+.cell-stack { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.cell-spark { display: flex; flex-direction: column; gap: 2px; white-space: nowrap; }
+.spark { width: 72px; height: 18px; display: block; }
+.spark path { fill: none; stroke: var(--slot-1); stroke-width: 1.5; stroke-linejoin: round; stroke-linecap: round; }
+.ellipsis { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 320px; }
+.tone-text-warning { color: var(--warning); }
+.row-bad td { background: var(--critical-bg); }
+.pill-link { text-decoration: none; }
+@media (max-width: 700px) {
+  .cell-stack, .cell-spark { align-items: flex-end; }
+  td.grow .cell-stack { align-items: flex-start; }
+  .ellipsis { max-width: 100%; }
+}
