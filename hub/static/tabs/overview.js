@@ -47,9 +47,9 @@ export function render(root, { data, now, ledger = {} }) {
         }), { note: 'last 14 days, by the day a session started' })
         : card('Tokens per day', sectionError(data.daily) || columns(days, {
           series: hasLedger
-            ? [{ key: 'measured', label: 'Measured', slot: 1 }, { key: 'estimated', label: 'Before tracking: whole sessions by start day', slot: 'muted' }]
+            ? [{ key: 'measured', label: 'Measured', slot: 1 }, { key: 'estimated', label: 'Estimated (before tracking started)', slot: 'muted' }]
             : [{ key: 'estimated', label: 'Tokens in + out', slot: 'muted' }],
-          title: 'Tokens per day', label: dayLabelFn,
+          title: 'Tokens per day', label: dayLabelFn, hideZero: true,
         }), { note: hasLedger ? `last 14 days · ${billingNote(data.models)}` : `last 14 days, whole sessions by the day they started (daily tracking starts now) · ${billingNote(data.models)}` }),
       card('Sessions per day', sectionError(data.daily) || columns(data.daily, {
         series: [{ key: 'conversations', label: 'Conversations', slot: 1 }, { key: 'subagents', label: 'Subagents', slot: 2 },

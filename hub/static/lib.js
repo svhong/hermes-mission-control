@@ -191,7 +191,9 @@ function niceMax(v) {
 
 // Vertical (stacked) columns, one per item. HTML so text stays readable on phones.
 // series: [{key, label, slot}] ; slot = categorical color slot 1..8
-export function columns(items, { series, label, format = num, height = 140, title }) {
+// hideZero: leave series that are 0 for an item out of its tooltip (for series
+// that are alternatives, like measured vs estimated, rather than parts of a total).
+export function columns(items, { series, label, format = num, height = 140, title, hideZero = false }) {
   const totals = items.map(it => series.reduce((a, s) => a + (it[s.key] || 0), 0));
   const max = niceMax(Math.max(0, ...totals));
   const plot = el('div', { class: 'cols-plot' });
@@ -214,8 +216,12 @@ export function columns(items, { series, label, format = num, height = 140, titl
       stack.append(seg);
     }
     col.append(stack);
-    tip(col, () => [label(it), ...series.map(s => `${s.label}: ${format(it[s.key] || 0)}`),
-      ...(series.length > 1 ? [`Total: ${format(totals[i])}`] : [])]);
+    tip(col, () => {
+      let shown = hideZero ? series.filter(s => it[s.key]) : series;
+      if (!shown.length) shown = series.slice(0, 1);
+      return [label(it), ...shown.map(s => `${s.label}: ${format(it[s.key] || 0)}`),
+        ...(shown.length > 1 ? [`Total: ${format(totals[i])}`] : [])];
+    });
     bars.append(col);
   });
   plot.append(bars);
