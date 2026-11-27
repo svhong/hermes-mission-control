@@ -13,7 +13,7 @@ import re
 
 from hermes_db import json_strings, parse_list, pick_text
 from tabs import section
-from tabs.overview import ACTIVE_S, HEARTBEAT_STALE_S, SUB_ACTIVE_S, activity_sql, cost_sql
+from tabs.overview import ACTIVE_S, SUB_ACTIVE_S, activity_sql, cost_sql, gateways
 
 TAB = {"id": "agents", "title": "Agents", "order": 20}
 INTERVAL = 5
@@ -55,16 +55,14 @@ def profiles(db, ctx):
         r["cost"] = round(r["cost"] or 0, 4)
         r.update(gateway_alive=None, gateway_uptime_s=None)
         out[r["profile"]] = r
-    if db.has("gateway_heartbeats", "last_heartbeat", "started_at"):
-        for g in db.rows("SELECT COALESCE(NULLIF(%s, ''), 'default') AS profile, started_at, last_heartbeat "
-                         "FROM gateway_heartbeats" % db.col("gateway_heartbeats", "profile", default="NULL")):
-            p = out.setdefault(g["profile"], {"profile": g["profile"], "conversations": 0, "subagents": 0,
-                                              "cost": 0, "last_activity_at": None,
-                                              "gateway_alive": None, "gateway_uptime_s": None})
-            alive = ctx.now - g["last_heartbeat"] < HEARTBEAT_STALE_S
-            if alive or p["gateway_alive"] is None:
-                p["gateway_alive"] = alive
-                p["gateway_uptime_s"] = round(ctx.now - g["started_at"]) if alive else None
+    gws = gateways(db, ctx)
+    for g in gws if isinstance(gws, list) else []:
+        p = out.setdefault(g["profile"], {"profile": g["profile"], "conversations": 0, "subagents": 0,
+                                          "cost": 0, "last_activity_at": None,
+                                          "gateway_alive": None, "gateway_uptime_s": None})
+        if g["alive"] or p["gateway_alive"] is None:
+            p["gateway_alive"] = g["alive"]
+            p["gateway_uptime_s"] = g["uptime_s"]
     return sorted(out.values(), key=lambda p: (p["profile"] != "default", p["profile"]))
 
 

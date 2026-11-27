@@ -1,4 +1,6 @@
 """Overview tab: what Hermes is doing now, what it has cost, and what needs attention."""
+import os
+import socket
 import time
 
 from tabs import section
@@ -63,10 +65,16 @@ def gateways(db, ctx):
                    "FROM gateway_heartbeats ORDER BY last_heartbeat DESC LIMIT 20"
                    % (db.col("gateway_heartbeats", "profile", default="''"),
                       db.col("gateway_heartbeats", "host", default="''")))
+    this_host = socket.gethostname()
     for r in rows:
         r["profile"] = r["profile"] or "default"
         r["heartbeat_age_s"] = round(ctx.now - r["last_heartbeat"], 1)
-        r["alive"] = r["heartbeat_age_s"] < HEARTBEAT_STALE_S
+        r["heartbeat_fresh"] = r["heartbeat_age_s"] < HEARTBEAT_STALE_S
+        # Heartbeats can be far apart when Hermes is idle, so on this machine
+        # also check whether the gateway process itself is still running.
+        r["process_running"] = (process_running(r["pid"], r["started_at"])
+                                if r["host"] in ("", this_host) else None)
+        r["alive"] = r["heartbeat_fresh"] or bool(r["process_running"])
         r["uptime_s"] = round(ctx.now - r["started_at"]) if r["alive"] else None
     # Hermes leaves rows behind for gateways that were restarted; drop old ones.
     if any(r["alive"] for r in rows):
@@ -74,6 +82,32 @@ def gateways(db, ctx):
     else:
         rows = rows[:1]
     return rows
+
+
+def process_running(pid, started_at):
+    """True if pid is a running gateway process that started when the row says.
+
+    Checks the command line mentions "gateway" and the start time matches,
+    so a pid reused by some other program isn't mistaken for Hermes.
+    Returns None if /proc can't tell us (e.g. a different OS).
+    """
+    try:
+        with open("/proc/%d/cmdline" % int(pid), "rb") as f:
+            args = f.read().split(b"\0")
+        with open("/proc/%d/stat" % int(pid)) as f:
+            stat = f.read()
+        with open("/proc/stat") as f:
+            boot = next(float(line.split()[1]) for line in f if line.startswith("btime "))
+    except FileNotFoundError:
+        return False
+    except (OSError, ValueError, StopIteration):
+        return None
+    if not any(b"gateway" in a for a in args):
+        return False
+    # Field 22 of /proc/<pid>/stat is the start time in clock ticks after boot.
+    ticks = float(stat.rsplit(")", 1)[1].split()[19])
+    started = boot + ticks / os.sysconf("SC_CLK_TCK")
+    return abs(started - started_at) < 600
 
 
 def now(db, ctx):

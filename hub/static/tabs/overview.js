@@ -52,6 +52,7 @@ function gatewayStrip(gws, now) {
       g.profile !== 'default' ? `profile ${g.profile}` : null,
       g.host || null,
       g.alive ? `up ${duration(g.uptime_s)}` : `last heartbeat ${ago(g.last_heartbeat, now)}`,
+      g.alive && !g.heartbeat_fresh ? `process running, last heartbeat ${ago(g.last_heartbeat, now)}` : null,
       `pid ${g.pid}`,
     ].filter(Boolean).join(' · ') }))));
 }

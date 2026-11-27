@@ -169,6 +169,25 @@ class LinkingTest(unittest.TestCase):
         self.assertEqual(subs["a"]["tool_names"], [])   # a hash, not tool names
 
 
+class GatewayProcessTest(unittest.TestCase):
+    def test_process_check(self):
+        import subprocess
+        import time
+        from tabs.overview import process_running
+        proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)", "gateway", "run"])
+        try:
+            time.sleep(0.3)
+            self.assertTrue(process_running(proc.pid, time.time()))
+            # Same pid but the row says it started long ago: a reused pid, not our gateway.
+            self.assertFalse(process_running(proc.pid, time.time() - 86400))
+            # A running process that isn't a gateway.
+            self.assertFalse(process_running(os.getpid(), time.time()))
+        finally:
+            proc.kill()
+            proc.wait()
+        self.assertFalse(process_running(proc.pid, time.time()))
+
+
 class HelpersTest(unittest.TestCase):
     def test_parse_list(self):
         self.assertEqual(parse_list('["a", "b", "a"]'), ["a", "b"])
