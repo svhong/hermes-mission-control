@@ -273,11 +273,12 @@ if [[ $HTTPS -eq 1 ]]; then
 fi
 
 echo
-echo "Dashboard:"
-[[ $HTTPS_OK -eq 1 && -n $TS_NAME ]] && echo "  https://$TS_NAME:$HTTPS_PORT"
+echo "Dashboard (from any device signed in to your Tailscale):"
+[[ -n $TS_NAME ]] && echo "  http://${TS_NAME%%.*}:$PORT            <- short name (needs MagicDNS, on by default)"
+[[ $HTTPS_OK -eq 1 && -n $TS_NAME ]] && echo "  https://$TS_NAME:$HTTPS_PORT   <- HTTPS"
 [[ -n $TS_NAME ]] && echo "  http://$TS_NAME:$PORT"
 echo "  http://$TS_IP:$PORT"
-echo "  (works from any device signed in to your Tailscale)"
+echo "  Tailscale encrypts this traffic, so plain http:// is fine; --https adds a browser-trusted address."
 [[ -z $PW_HASH ]] && echo "No viewer password is set. Add one with: sudo ./install.sh --set-password"
 [[ $SHOW_TEXT == 0 ]] && echo "Numbers-only mode: titles, activity and task goals are not sent."
 exit $FAILED
