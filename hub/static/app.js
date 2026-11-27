@@ -1,6 +1,7 @@
 // Page shell: login, tab bar, source picker, polling. Each tab lives in
 // /static/tabs/<id>.js and exports render(root, ctx).
 import { el, ago, pill, hideTip } from './lib.js';
+import { renderHero } from './hero.js';
 
 const POLL_MS = 5000;
 const $ = id => document.getElementById(id);
@@ -30,6 +31,7 @@ function showLogin(show) {
   $('login').hidden = !show;
   $('main').hidden = show;
   $('tabs').hidden = show;
+  if (show) renderHero($('hero'), null);
   if (show) $('password').focus();
 }
 
@@ -109,9 +111,6 @@ function renderTop(source) {
   if (!pick.hidden) {
     sel.replaceChildren(...state.sources.map(s => el('option', { value: s.id, text: s.id, selected: s.id === source.id })));
   }
-  const g = $('garage-link');
-  g.hidden = !state.garage_url;
-  if (state.garage_url) g.href = state.garage_url;
 }
 
 function renderFoot(source) {
@@ -128,6 +127,8 @@ async function render() {
   renderTabs(tabId);
   renderTop(source);
   renderFoot(source);
+  renderHero($('hero'), source?.report?.machine,
+    { stale: source ? source.age_s > Math.max(30, (source.report.interval_s || 5) * 2 + 15) : false });
   const main = $('main');
   if (!source) {
     main.replaceChildren(el('div', { class: 'empty', text: 'Waiting for the collector to send its first report…' }));
