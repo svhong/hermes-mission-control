@@ -27,6 +27,7 @@ def collect(db, ctx):
         "tools": section(tools, db, ctx),
         "warnings": section(warnings, db, ctx),
         "recent": section(recent, db, ctx),
+        "session_tokens": section(session_tokens, db, ctx),
     }
 
 
@@ -348,6 +349,17 @@ def current_turn(db, session_id):
                 tools[r["tool_name"]] = tools.get(r["tool_name"], 0) + r["n"]
     turn["tools"] = sorted(tools.items(), key=lambda kv: -kv[1])[:4]
     return turn
+
+
+def session_tokens(db, ctx):
+    """Running token totals of sessions active since yesterday: [id, started_at, tokens].
+
+    Hermes only keeps totals per session, so the hub records these over time
+    to work out how many tokens were used on each day (see hub.Ledger).
+    """
+    return [[r["id"], r["started_at"], r["tokens"]] for r in db.rows(
+        "SELECT s.id, s.started_at, %s AS tokens FROM sessions s WHERE %s >= ? LIMIT 5000"
+        % (tokens_sql(db), activity_sql(db)), (ctx.day_start - 86400,))]
 
 
 def recent(db, ctx):

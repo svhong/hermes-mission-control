@@ -256,3 +256,4 @@ main { max-width: 1320px; margin: 0 auto; padding: 16px; }
 .more { margin-top: 10px; }
 .conv-activity { color: var(--text); }
 .live-label { color: var(--good); font-weight: 600; }
+.slot-muted { background: var(--text-2); opacity: .45; }

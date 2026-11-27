@@ -12,6 +12,8 @@ Settings (see /etc/hermes-mission-control/hub.env):
                            (create with: python3 hub/hub.py --hash-password)
   HMC_SESSION_HOURS        how long a login lasts (default 168 = 7 days)
   HMC_GARAGE_URL           optional link to your garage-monitor dashboard
+  STATE_DIRECTORY          where to keep the daily token ledger (set by systemd);
+                           without it the ledger lives in memory only
 """
 import getpass
 import hashlib
@@ -43,6 +45,100 @@ STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 STATIC_TYPES = {".html", ".js", ".css", ".svg", ".png", ".ico", ".json"}
 TAB_ID = re.compile(r"^[a-z0-9_-]{1,32}$")
 SOURCE_ID = re.compile(r"^[A-Za-z0-9_.@-]{1,64}$")
+
+LEDGER_DAYS = 16
+STATE_DIR = os.environ.get("STATE_DIRECTORY", "").split(":")[0]
+
+
+def ui_version():
+    """Changes whenever the dashboard files change, so open pages reload themselves."""
+    h = hashlib.sha256()
+    for root, _, files in sorted(os.walk(STATIC_DIR)):
+        for name in sorted(files):
+            st = os.stat(os.path.join(root, name))
+            h.update(("%s:%d:%d;" % (os.path.join(root, name), st.st_size, st.st_mtime_ns)).encode())
+    return h.hexdigest()[:12]
+
+
+UI_VERSION = ui_version()
+
+
+class Ledger:
+    """Tokens used per day, per source.
+
+    Hermes keeps one running total per session, and a chat can run for days,
+    so "tokens today" can't be read from the database. The ledger remembers
+    each session's total at the start of the day (or when first seen) and
+    counts the growth. Saved to STATE_DIRECTORY so restarts don't lose it.
+    """
+
+    def __init__(self, path=None):
+        self.path = path
+        self.days = {}  # source -> day -> {"base": {sid: t}, "cur": {sid: t}, "since": ts|None}
+        self.dirty = False
+        self.saved_at = 0.0
+        if path and os.path.exists(path):
+            try:
+                with open(path) as f:
+                    self.days = json.load(f)
+            except (OSError, ValueError):
+                print("ledger: couldn't read %s, starting a new one" % path, flush=True)
+
+    @staticmethod
+    def day_key(t):
+        return time.strftime("%Y-%m-%d", time.localtime(t))
+
+    def update(self, source, rows, now=None):
+        now = now or time.time()
+        key = self.day_key(now)
+        lt = time.localtime(now)
+        day_start = time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday, 0, 0, 0, 0, 0, -1))
+        days = self.days.setdefault(source, {})
+        day = days.setdefault(key, {"base": {}, "cur": {}, "since": None})
+        earlier = [k for k in days if k < key]
+        prev = days[max(earlier)] if earlier else None
+        for row in rows:
+            try:
+                sid, started, tokens = str(row[0]), float(row[1]), int(row[2] or 0)
+            except (TypeError, ValueError, IndexError):
+                continue
+            if sid not in day["base"]:
+                if started >= day_start:
+                    day["base"][sid] = 0
+                elif prev and sid in prev["cur"]:
+                    day["base"][sid] = prev["cur"][sid]
+                else:  # we didn't see this session before today: count from now
+                    day["base"][sid] = tokens
+                    day["since"] = day["since"] or now
+            day["cur"][sid] = max(tokens, day["cur"].get(sid, 0))
+        for old in sorted(days)[:-LEDGER_DAYS]:
+            del days[old]
+        self.dirty = True
+        if self.path and now - self.saved_at > 60:
+            self.save(now)
+
+    def save(self, now=None):
+        if not (self.path and self.dirty):
+            return
+        tmp = self.path + ".tmp"
+        try:
+            with open(tmp, "w") as f:
+                json.dump(self.days, f)
+            os.replace(tmp, self.path)
+            self.dirty = False
+            self.saved_at = now or time.time()
+        except OSError as e:
+            print("ledger: couldn't save: %s" % e, flush=True)
+
+    def view(self, source):
+        out = {}
+        for key, day in self.days.get(source, {}).items():
+            used = sum(max(0, cur - day["base"].get(sid, cur)) for sid, cur in day["cur"].items())
+            out[key] = {"tokens": used, "since": day["since"]}
+        return out
+
+
+ledger = Ledger(os.path.join(STATE_DIR, "ledger.json") if STATE_DIR else None)
 
 sources = {}   # source id -> {"report": ..., "received": t}
 sessions = {}  # login token -> expiry
@@ -112,8 +208,11 @@ def record(report):
     sid = str(report.get("source") or "")
     if not SOURCE_ID.match(sid):
         raise ValueError("bad source name")
+    rows = ((report.get("data") or {}).get("overview") or {}).get("session_tokens")
     with lock:
         sources[sid] = {"report": report, "received": time.time()}
+        if isinstance(rows, list):
+            ledger.update(sid, rows)
 
 
 def snapshot():
@@ -121,7 +220,8 @@ def snapshot():
     with lock:
         for sid in [s for s, e in sources.items() if now - e["received"] > FORGET_AFTER_S]:
             del sources[sid]
-        items = [{"id": sid, "age_s": round(now - e["received"], 1), "report": e["report"]}
+        items = [{"id": sid, "age_s": round(now - e["received"], 1), "report": e["report"],
+                  "ledger": ledger.view(sid)}
                  for sid, e in sorted(sources.items())]
     # Tabs = every tab any source reports that has a renderer, in order.
     tabs = {}
@@ -131,7 +231,7 @@ def snapshot():
             if tid not in tabs and tab_has_renderer(tid):
                 tabs[tid] = {"id": tid, "title": str(t.get("title") or tid)[:40], "order": t.get("order", 100)}
     tab_list = sorted(tabs.values(), key=lambda t: (t["order"] if isinstance(t["order"], (int, float)) else 100, t["id"]))
-    return {"now": now, "sources": items, "tabs": tab_list, "garage_url": GARAGE_URL}
+    return {"now": now, "sources": items, "tabs": tab_list, "garage_url": GARAGE_URL, "ui_version": UI_VERSION}
 
 
 # ---- HTTP -----------------------------------------------------------------------------
@@ -252,6 +352,9 @@ def main():
         raise SystemExit("HMC_TOKEN is not set; refusing to start without one")
     if not PASSWORD_HASH:
         print("warning: no viewer password set; anyone who can reach this port can view the dashboard", flush=True)
+    print("token ledger: %s" % (ledger.path or "in memory only (no STATE_DIRECTORY)"), flush=True)
+    import atexit
+    atexit.register(ledger.save)
     addresses = [a.strip() for a in BIND.split(",") if a.strip()]
     for addr in addresses[1:]:
         threading.Thread(target=serve, args=(addr,), daemon=True).start()

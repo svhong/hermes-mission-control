@@ -11,6 +11,7 @@ const store = {
 
 let token = store.get('hmc_token') || '';
 let state = null;
+let loadedVersion = null; // dashboard code version this page was loaded with
 let timer = null;
 const modules = {};
 
@@ -140,7 +141,7 @@ async function render() {
     const root = el('div', { class: 'tab-root' });
     if (!data) root.append(el('div', { class: 'empty', text: 'This source has no data for this tab.' }));
     else if (data._error) root.append(el('div', { class: 'error', text: 'This tab failed: ' + data._error }));
-    else modules[tabId].render(root, { data, source, now: state.now, rerender: render });
+    else modules[tabId].render(root, { data, source, ledger: source.ledger || {}, now: state.now, rerender: render });
     hideTip();
     main.replaceChildren(root);
   } catch (err) {
@@ -153,6 +154,9 @@ async function poll() {
   clearTimeout(timer);
   try {
     state = await api('/api/state');
+    // The dashboard was updated since this page loaded: reload to get the new code.
+    if (loadedVersion && state.ui_version && state.ui_version !== loadedVersion) { location.reload(); return; }
+    loadedVersion = loadedVersion || state.ui_version;
     $('logout').hidden = !token;
     await render();
   } catch (err) {

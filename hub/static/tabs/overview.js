@@ -17,20 +17,40 @@ function billingNote(models) {
 
 const dayLabelFn = (d, short) => short ? dayLabel(d.day).replace(/^\w+ /, '') : dayLabel(d.day);
 
-export function render(root, { data, now }) {
+// Per-day tokens: measured by the hub's ledger where it has data; earlier days
+// fall back to whole sessions counted on the day they started.
+function tokenDays(daily, ledger) {
+  if (!Array.isArray(daily)) return daily;
+  return daily.map(d => {
+    const m = ledger[d.day];
+    return { ...d, measured: m ? m.tokens : 0, estimated: m ? 0 : d.tokens, since: m?.since || null };
+  });
+}
+
+function clockTime(t) {
+  return new Date(t * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+}
+
+export function render(root, { data, now, ledger = {} }) {
   const priced = isPriced(data);
+  const days = tokenDays(data.daily, ledger);
+  const today = Array.isArray(days) ? days[days.length - 1] : null;
+  const hasLedger = Array.isArray(days) && days.some(d => ledger[d.day]);
   root.append(
     gatewayStrip(data.gateways, now),
-    tiles(data.now, data.today, priced, data.models),
+    tiles(data.now, data.today, priced, data.models, today && ledger[today.day] ? today : null),
     warnings(data.warnings),
     el('div', { class: 'grid two' },
       priced
         ? card('Spend per day', sectionError(data.daily) || columns(data.daily, {
           series: [{ key: 'cost', label: 'Spend', slot: 1 }], format: money, title: 'Spend per day', label: dayLabelFn,
         }), { note: 'last 14 days, by the day a session started' })
-        : card('Tokens per day', sectionError(data.daily) || columns(data.daily, {
-          series: [{ key: 'tokens', label: 'Tokens in + out', slot: 1 }], title: 'Tokens per day', label: dayLabelFn,
-        }), { note: `last 14 days · ${billingNote(data.models)}` }),
+        : card('Tokens per day', sectionError(data.daily) || columns(days, {
+          series: hasLedger
+            ? [{ key: 'measured', label: 'Measured', slot: 1 }, { key: 'estimated', label: 'Before tracking: whole sessions by start day', slot: 'muted' }]
+            : [{ key: 'estimated', label: 'Tokens in + out', slot: 'muted' }],
+          title: 'Tokens per day', label: dayLabelFn,
+        }), { note: hasLedger ? `last 14 days · ${billingNote(data.models)}` : `last 14 days, whole sessions by the day they started (daily tracking starts now) · ${billingNote(data.models)}` }),
       card('Sessions per day', sectionError(data.daily) || columns(data.daily, {
         series: [{ key: 'conversations', label: 'Conversations', slot: 1 }, { key: 'subagents', label: 'Subagents', slot: 2 },
           { key: 'scheduled', label: 'Scheduled runs', slot: 3 }],
@@ -57,7 +77,7 @@ function gatewayStrip(gws, now) {
     ].filter(Boolean).join(' · ') }))));
 }
 
-function tiles(n, t, priced, models) {
+function tiles(n, t, priced, models, measuredToday) {
   const errs = [sectionError(n), sectionError(t)].filter(Boolean);
   if (errs.length) return el('div', {}, errs);
   const workers = Object.entries(n.workers || {}).filter(([k]) => k !== 'child').map(([k, v]) => `${v} ${k}`).join(', ');
@@ -66,7 +86,9 @@ function tiles(n, t, priced, models) {
     tile('Subagents working', num(n.active_subagents), workers ? `other workers: ${workers}` : 'delegated tasks running now'),
     tile('Queued requests', n.queued === null ? '–' : num(n.queued), 'waiting for a turn', n.queued > 5 ? 'warning' : null),
     priced ? tile('Spend today', money(t.cost), `${num(t.tokens)} tokens in + out`)
-      : tile('Tokens today', num(t.tokens), billingNote(models)),
+      : measuredToday
+        ? tile('Tokens today', num(measuredToday.measured), measuredToday.since ? `counted since ${clockTime(measuredToday.since)} · all sessions incl. older chats` : 'all sessions, incl. chats started earlier')
+        : tile('Tokens today', num(t.tokens), 'sessions started today only (tracking starting…)'),
     tile('Messages today', num(t.messages), `${num(t.conversations)} conversations · ${num(t.scheduled || 0)} scheduled runs`),
     tile('Tool calls today', num(t.tool_calls), `${num(t.subagents)} subagents started`),
   );

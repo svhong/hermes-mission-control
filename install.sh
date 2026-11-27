@@ -195,6 +195,8 @@ EnvironmentFile=$CONF/hub.env
 ExecStart=/usr/bin/python3 $PREFIX/hub/hub.py
 Restart=always
 RestartSec=5
+# Daily token ledger lives in /var/lib/$APP (the only place the hub can write).
+StateDirectory=$APP
 CapabilityBoundingSet=
 NoNewPrivileges=true
 ProtectSystem=strict

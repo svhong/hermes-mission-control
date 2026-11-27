@@ -76,7 +76,7 @@ class Fake:
         tin = random.randint(2_000, 60_000) * max(1, n_messages // 4)
         tout = int(tin * random.uniform(0.05, 0.25))
         pin, pout = PRICES.get(model, (1, 3))
-        cost = tin / 1e6 * pin + tout / 1e6 * pout
+        cost = 0 if getattr(self, "unpriced", False) else tin / 1e6 * pin + tout / 1e6 * pout
         tools = random.sample([t for t, _ in TOOLS], k=random.randint(1, 4))
         activity_at = activity_at or ended or started + 60
         self.db.execute(
@@ -99,7 +99,8 @@ class Fake:
             self.db.execute(
                 "INSERT INTO session_model_usage (session_id, model, task, api_call_count, input_tokens, "
                 "output_tokens, estimated_cost_usd, first_seen, last_seen) VALUES (?,?,?,?,?,?,?,?,?)",
-                (sid, "openai/gpt-5-mini", "compression", 1, tin // 4, tin // 40, round(tin / 4e6 * 0.25, 6),
+                (sid, "openai/gpt-5-mini", "compression", 1, tin // 4, tin // 40,
+                 0 if getattr(self, "unpriced", False) else round(tin / 4e6 * 0.25, 6),
                  started, activity_at))
         self.messages(sid, started, activity_at, n_messages)
         return sid
@@ -248,8 +249,8 @@ class Fake:
                 self.messages(sid, now, now, 1, first=0 if random.random() < 0.03 else 1)
                 self.db.execute("UPDATE sessions SET last_activity_at = ?, last_activity_description = ?, "
                                 "message_count = message_count + 1, input_tokens = input_tokens + 1500, "
-                                "estimated_cost_usd = estimated_cost_usd + 0.004 WHERE id = ?",
-                                (now, random.choice(ACTIVITIES), sid))
+                                "estimated_cost_usd = estimated_cost_usd + ? WHERE id = ?",
+                                (now, random.choice(ACTIVITIES), 0 if getattr(self, "unpriced", False) else 0.004, sid))
             if random.random() < 0.05:
                 self.subagents(sid, now - 100, None, running=True)
         # Finish running subagents after a while; occasionally one fails.
@@ -276,11 +277,18 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--db", required=True, help="path of the fake state.db to create or update")
     ap.add_argument("--live", action="store_true", help="keep updating it every 2 seconds")
+    ap.add_argument("--unpriced", action="store_true",
+                    help="no costs, like a subscription login (the dashboard then shows tokens)")
     args = ap.parse_args()
     fake = Fake(args.db)
+    fake.unpriced = args.unpriced
     if fake.db.execute("SELECT count(*) FROM sessions").fetchone()[0] == 0:
         fake.populate()
         print("created %s" % args.db, flush=True)
+    if args.unpriced:
+        fake.db.execute("UPDATE sessions SET estimated_cost_usd = 0, actual_cost_usd = NULL, "
+                        "billing_mode = 'subscription', cost_status = 'included'")
+        fake.db.execute("UPDATE session_model_usage SET estimated_cost_usd = 0, actual_cost_usd = 0")
     if args.live:
         print("live mode: updating every 2 s (Ctrl+C to stop)", flush=True)
         try:
