@@ -1,5 +1,5 @@
 // Agents: profiles, and conversations with the subagents they delegated to.
-import { el, card, table, pill, statePill, money, num, ago, duration, clock, shortId, sectionError, empty } from '../lib.js';
+import { el, card, table, pill, statePill, money, num, ago, duration, clock, shortId, sectionError, empty, turnText } from '../lib.js';
 
 // Kept across re-renders (the page refreshes every few seconds).
 // Conversations that are working start expanded, finished ones collapsed;
@@ -71,10 +71,13 @@ function conversation(c, ctx) {
     el('span', { class: 'muted small', text: [c.source, c.profile !== 'default' ? c.profile : null, c.model, c.continuations ? `continued ${c.continuations}×` : null].filter(Boolean).join(' · ') })),
   el('span', { class: 'conv-stats small' },
     el('span', { text: `${st.subagents} subagent${st.subagents === 1 ? '' : 's'}${st.running ? ` · ${st.running} working` : ''}` }),
-    el('span', { class: 'muted', text: `${num((c.tokens_in || 0) + (c.tokens_out || 0) + st.tokens)} tok${(c.cost || 0) + st.cost > 0 ? ' · ' + money((c.cost || 0) + st.cost) : ''} · ${ago(st.last_activity_at, ctx.now)}` })));
+    el('span', { class: 'muted', text: `${c.turn ? 'session ' : ''}${num((c.tokens_in || 0) + (c.tokens_out || 0) + st.tokens)} tok${(c.cost || 0) + st.cost > 0 ? ' · ' + money((c.cost || 0) + st.cost) : ''} · ${ago(st.last_activity_at, ctx.now)}` })));
   const wrap = el('div', { class: 'conv' + (st.running ? ' has-running' : '') }, head);
   if (!collapsed) {
-    if (c.activity && (c.status === 'active' || c.status === 'running')) wrap.append(el('div', { class: 'conv-activity muted small', text: '↳ ' + c.activity }));
+    if (c.status === 'active' || c.status === 'running') {
+      const now = [turnText(c.turn, ctx.now), c.activity].filter(Boolean).join(' · ');
+      if (now) wrap.append(el('div', { class: 'conv-activity small' }, el('span', { class: 'live-label', text: '↳ ' }), now));
+    }
     if (c.children.length) wrap.append(el('div', { class: 'subs', role: 'list' }, c.children.map(s => subagent(s, 0, ctx))));
     else wrap.append(el('div', { class: 'muted small pad', text: 'No subagents' }));
   }

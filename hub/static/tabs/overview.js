@@ -1,5 +1,5 @@
 // Overview: now, today, trends, and what needs attention.
-import { el, card, tile, columns, bars, table, pill, money, num, ago, duration, dayLabel, shortId, sectionError, empty } from '../lib.js';
+import { el, card, tile, columns, bars, table, pill, money, num, ago, duration, dayLabel, shortId, sectionError, empty, turnText } from '../lib.js';
 
 // Costs are only meaningful when the provider reports prices; on a
 // subscription every cost is 0, so show tokens instead.
@@ -123,7 +123,7 @@ function recentCard(rows, now, priced) {
     { label: 'Status', cell: r => r.active ? pill('active') : r.ended_at ? pill('done', r.scheduled ? 'Ran' : 'Ended') : pill('idle') },
     { label: 'Conversation', class: 'grow', cell: r => el('div', {},
       el('div', { class: 'strong', text: r.title || shortId(r.id) }),
-      r.activity && r.active ? el('div', { class: 'muted small', text: r.activity }) : null) },
+      r.active && (r.turn || r.activity) ? el('div', { class: 'muted small', text: [turnText(r.turn, now), r.activity].filter(Boolean).join(' · ') }) : null) },
     { label: 'Platform', cell: r => (r.scheduled ? 'cron (scheduled)' : r.source) + (r.profile !== 'default' ? ` · ${r.profile}` : '') },
     { label: 'Model', class: 'hide-sm', cell: r => r.model || '–' },
     { label: 'Messages', class: 'num', cell: r => num(r.messages) },

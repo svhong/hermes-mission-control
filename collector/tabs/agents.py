@@ -13,7 +13,7 @@ import re
 
 from hermes_db import json_strings, parse_list, pick_text
 from tabs import section
-from tabs.overview import ACTIVE_S, SUB_ACTIVE_S, activity_sql, cost_sql, gateways
+from tabs.overview import ACTIVE_S, SUB_ACTIVE_S, activity_sql, cost_sql, current_turn, gateways
 
 TAB = {"id": "agents", "title": "Agents", "order": 20}
 INTERVAL = 5
@@ -191,6 +191,7 @@ def tree(db, ctx):
             o[k] = sum(m[k] for m in members)
         o["cost"] = round(sum(m["cost"] or 0 for m in members), 4)
         o["duration_s"] = round((head["ended_at"] or ctx.now) - o["started_at"])
+        o["turn"] = current_turn(db, head["id"]) if o["status"] in ("active", "running") else None
         out_nodes[cid] = o
     for nid, n in nodes.items():
         if n["is_sub"]:

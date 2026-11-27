@@ -320,6 +320,36 @@ def warnings(db, ctx):
     return out
 
 
+def current_turn(db, session_id):
+    """What the latest turn of a conversation has done so far: from the last
+    user message on. Metadata only (times, roles, tool names, token counts).
+
+    Long-lived chats (e.g. Telegram) keep one session for many tasks, so the
+    session's totals and title describe its whole history; this describes the
+    task in progress.
+    """
+    if not db.has("messages", "session_id", "role", "timestamp"):
+        return None
+    started = db.one("SELECT max(timestamp) FROM messages WHERE session_id = ? AND role = 'user'", (session_id,))
+    if started is None:
+        return None
+    tok = "sum(COALESCE(token_count, 0))" if db.has("messages", "token_count") else "0"
+    turn = {"started_at": started, "messages": 0, "tool_calls": 0, "tokens": 0, "tools": [], "last_at": started}
+    tools = {}
+    for r in db.rows("SELECT role, tool_name, count(*) AS n, %s AS tokens, max(timestamp) AS last_at "
+                     "FROM messages WHERE session_id = ? AND timestamp >= ? GROUP BY role, tool_name" % tok,
+                     (session_id, started)):
+        turn["messages"] += r["n"]
+        turn["tokens"] += r["tokens"] or 0
+        turn["last_at"] = max(turn["last_at"], r["last_at"])
+        if r["role"] == "tool":
+            turn["tool_calls"] += r["n"]
+            if r["tool_name"]:
+                tools[r["tool_name"]] = tools.get(r["tool_name"], 0) + r["n"]
+    turn["tools"] = sorted(tools.items(), key=lambda kv: -kv[1])[:4]
+    return turn
+
+
 def recent(db, ctx):
     """Most recently active conversations (not subagents)."""
     sub = db.is_subagent_sql()
@@ -343,4 +373,5 @@ def recent(db, ctx):
         r["cost"] = round(r["cost"] or 0, 4)
         r["active"] = r["ended_at"] is None and ctx.now - (r["last_activity_at"] or 0) < ACTIVE_S
         r["scheduled"] = r["source"] == "cron"
+        r["turn"] = current_turn(db, r["id"]) if r["active"] else None
     return rows

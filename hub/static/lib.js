@@ -72,6 +72,17 @@ export function dayLabel(key) {
   return new Date(y, m - 1, d).toLocaleDateString([], { month: 'short', day: 'numeric' });
 }
 
+// "This turn: 4m 12s · 18 tool calls (terminal 7, patch 4) · 96k tok"
+export function turnText(turn, now) {
+  if (!turn) return null;
+  const tools = turn.tools.map(([name, n]) => `${name} ${n}`).join(', ');
+  return [
+    `This turn: ${duration(now - turn.started_at)}`,
+    `${num(turn.tool_calls)} tool call${turn.tool_calls === 1 ? '' : 's'}${tools ? ` (${tools})` : ''}`,
+    turn.tokens ? `${num(turn.tokens)} tok` : null,
+  ].filter(Boolean).join(' · ');
+}
+
 // ---- status: color + icon + label, never color alone -----------------------------------
 
 const STATUS = {

@@ -169,6 +169,35 @@ class LinkingTest(unittest.TestCase):
         self.assertEqual(subs["a"]["tool_names"], [])   # a hash, not tool names
 
 
+class CurrentTurnTest(unittest.TestCase):
+    def test_counts_only_since_the_last_user_message(self):
+        import time
+        from tabs.overview import current_turn
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        path = os.path.join(tmp.name, "state.db")
+        conn = sqlite3.connect(path)
+        with open(fake_hermes.SCHEMA) as f:
+            conn.executescript(f.read())
+        now = time.time()
+        conn.execute("INSERT INTO sessions (id, source, started_at) VALUES ('s', 'telegram', ?)", (now - 86400,))
+        msgs = [("user", None, 9000, 10), ("tool", "web_search", 8990, 10),        # yesterday's task
+                ("user", None, 300, 50), ("assistant", None, 290, 400),             # today's task
+                ("tool", "terminal", 280, 100), ("tool", "terminal", 200, 100), ("tool", "patch", 100, 100)]
+        for role, tool, ago, tokens in msgs:
+            conn.execute("INSERT INTO messages (session_id, role, content, tool_name, timestamp, token_count) "
+                         "VALUES ('s', ?, 'x', ?, ?, ?)", (role, tool, now - ago, tokens))
+        conn.commit()
+        conn.close()
+        with HermesDB(path) as db:
+            turn = current_turn(db, "s")
+        self.assertAlmostEqual(turn["started_at"], now - 300, delta=1)
+        self.assertEqual(turn["tool_calls"], 3)
+        self.assertEqual(turn["messages"], 5)
+        self.assertEqual(turn["tokens"], 750)
+        self.assertEqual(turn["tools"], [("terminal", 2), ("patch", 1)])
+
+
 class GatewayProcessTest(unittest.TestCase):
     def spawn(self, *args):
         import subprocess

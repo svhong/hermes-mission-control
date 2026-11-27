@@ -104,12 +104,12 @@ class Fake:
         self.messages(sid, started, activity_at, n_messages)
         return sid
 
-    def messages(self, sid, start, end, n):
+    def messages(self, sid, start, end, n, first=0):
         t = start
         step = max(1.0, (end - start) / max(1, n))
         calls = 0
         for i in range(n):
-            role = "user" if i % 4 == 0 else random.choice(["assistant", "tool", "tool"])
+            role = "user" if (i + first) % 4 == 0 else random.choice(["assistant", "tool", "tool"])
             tool = pick(TOOLS) if role == "tool" else None
             disp = None
             if tool:
@@ -117,9 +117,9 @@ class Fake:
                 disp = "failed" if random.random() < 0.07 else "succeeded"
             self.db.execute(
                 "INSERT INTO messages (session_id, role, content, tool_name, effect_disposition, timestamp, "
-                "reasoning) VALUES (?,?,?,?,?,?,?)",
+                "reasoning, token_count) VALUES (?,?,?,?,?,?,?,?)",
                 (sid, role, "Message text %s #%d" % (PRIVATE_MARKER, i), tool, disp, t,
-                 "Reasoning " + PRIVATE_MARKER if role == "assistant" else None))
+                 "Reasoning " + PRIVATE_MARKER if role == "assistant" else None, random.randint(200, 6000)))
             t = min(end, t + step * random.uniform(0.5, 1.5))
         self.db.execute("UPDATE sessions SET tool_call_count = tool_call_count + ? WHERE id = ?", (calls, sid))
 
@@ -245,7 +245,7 @@ class Fake:
             active.append(self.conversation(now - 30, active=True))
         for sid in active:
             if random.random() < 0.5:
-                self.messages(sid, now, now, 1)
+                self.messages(sid, now, now, 1, first=0 if random.random() < 0.03 else 1)
                 self.db.execute("UPDATE sessions SET last_activity_at = ?, last_activity_description = ?, "
                                 "message_count = message_count + 1, input_tokens = input_tokens + 1500, "
                                 "estimated_cost_usd = estimated_cost_usd + 0.004 WHERE id = ?",
@@ -263,7 +263,7 @@ class Fake:
                                 "WHERE state = 'running' AND abs(created_at - ?) < 1", (now, started))
                 self.db.execute("UPDATE worker_executions SET status = 'terminal' WHERE session_id = ?", (sid,))
             elif random.random() < 0.4:
-                self.messages(sid, now, now, 1)
+                self.messages(sid, now, now, 1, first=1)
                 self.db.execute("UPDATE sessions SET last_activity_at = ?, last_activity_description = ? WHERE id = ?",
                                 (now, random.choice(ACTIVITIES), sid))
         # End a conversation now and then.
