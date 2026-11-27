@@ -51,8 +51,8 @@ function gatewayStrip(gws, now) {
     el('span', { class: 'muted', text: [
       g.profile !== 'default' ? `profile ${g.profile}` : null,
       g.host || null,
-      g.alive ? `up ${duration(g.uptime_s)}` : `last heartbeat ${ago(g.last_heartbeat, now)}`,
-      g.alive && !g.heartbeat_fresh ? `process running, last heartbeat ${ago(g.last_heartbeat, now)}` : null,
+      g.alive ? `up ${duration(g.uptime_s)}` : g.last_heartbeat ? `last heartbeat ${ago(g.last_heartbeat, now)}` : null,
+      g.alive && !g.heartbeat_fresh ? (g.last_heartbeat ? `idle, last heartbeat ${ago(g.last_heartbeat, now)}` : 'no heartbeat yet') : null,
       `pid ${g.pid}`,
     ].filter(Boolean).join(' · ') }))));
 }

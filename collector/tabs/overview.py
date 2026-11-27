@@ -59,55 +59,81 @@ def window_start(ctx, days):
 # ---- sections -----------------------------------------------------------------
 
 def gateways(db, ctx):
-    if not db.has("gateway_heartbeats", "pid", "started_at", "last_heartbeat"):
-        return []
-    rows = db.rows("SELECT pid, started_at, last_heartbeat, %s AS profile, %s AS host "
-                   "FROM gateway_heartbeats ORDER BY last_heartbeat DESC LIMIT 20"
-                   % (db.col("gateway_heartbeats", "profile", default="''"),
-                      db.col("gateway_heartbeats", "host", default="''")))
+    """Gateways, newest first. A gateway is up if Hermes's gateway process is
+    running on this machine, or (for other machines) its heartbeat is fresh.
+
+    Hermes stops writing heartbeats while idle, so on hermes-box the process
+    check is what decides; the heartbeat is shown for information.
+    """
+    rows = []
+    if db.has("gateway_heartbeats", "pid", "started_at", "last_heartbeat"):
+        rows = db.rows("SELECT pid, started_at, last_heartbeat, %s AS profile, %s AS host "
+                       "FROM gateway_heartbeats ORDER BY last_heartbeat DESC LIMIT 20"
+                       % (db.col("gateway_heartbeats", "profile", default="''"),
+                          db.col("gateway_heartbeats", "host", default="''")))
     this_host = socket.gethostname()
+    procs = gateway_processes()
+    matched = set()
     for r in rows:
         r["profile"] = r["profile"] or "default"
         r["heartbeat_age_s"] = round(ctx.now - r["last_heartbeat"], 1)
         r["heartbeat_fresh"] = r["heartbeat_age_s"] < HEARTBEAT_STALE_S
-        # Heartbeats can be far apart when Hermes is idle, so on this machine
-        # also check whether the gateway process itself is still running.
-        r["process_running"] = (process_running(r["pid"], r["started_at"])
-                                if r["host"] in ("", this_host) else None)
+        local = r["host"] in ("", this_host)
+        r["process_running"] = (r["pid"] in procs) if procs is not None and local else None
+        if r["process_running"]:
+            matched.add(r["pid"])
         r["alive"] = r["heartbeat_fresh"] or bool(r["process_running"])
-        r["uptime_s"] = round(ctx.now - r["started_at"]) if r["alive"] else None
+        start = procs[r["pid"]] if r["process_running"] else r["started_at"]
+        r["uptime_s"] = round(ctx.now - start) if r["alive"] else None
+    # A running gateway whose pid has no heartbeat row (e.g. restarted while idle).
+    for pid, start in sorted((procs or {}).items(), key=lambda kv: -kv[1]):
+        if pid not in matched:
+            rows.insert(0, {"pid": pid, "started_at": start, "last_heartbeat": None, "profile": "default",
+                            "host": this_host, "heartbeat_age_s": None, "heartbeat_fresh": False,
+                            "process_running": True, "alive": True, "uptime_s": round(ctx.now - start)})
     # Hermes leaves rows behind for gateways that were restarted; drop old ones.
     if any(r["alive"] for r in rows):
-        rows = [r for r in rows if r["alive"] or r["heartbeat_age_s"] < OLD_GATEWAY_S]
+        rows = [r for r in rows if r["alive"] or (r["heartbeat_age_s"] or 0) < OLD_GATEWAY_S]
     else:
         rows = rows[:1]
+    for r in rows:
+        r["checked_process"] = procs is not None and r["host"] in ("", this_host)
     return rows
 
 
-def process_running(pid, started_at):
-    """True if pid is a running gateway process that started when the row says.
+def gateway_processes():
+    """{pid: start time} of Hermes gateway processes ("... gateway run") owned by
+    this user, which is the Hermes user. None if /proc isn't available.
 
-    Checks the command line mentions "gateway" and the start time matches,
-    so a pid reused by some other program isn't mistaken for Hermes.
-    Returns None if /proc can't tell us (e.g. a different OS).
+    The same test garage-monitor uses. Processes forked from a gateway share
+    its command line, so only the top one of each family is returned.
     """
     try:
-        with open("/proc/%d/cmdline" % int(pid), "rb") as f:
-            args = f.read().split(b"\0")
-        with open("/proc/%d/stat" % int(pid)) as f:
-            stat = f.read()
         with open("/proc/stat") as f:
             boot = next(float(line.split()[1]) for line in f if line.startswith("btime "))
-    except FileNotFoundError:
-        return False
+        tick = os.sysconf("SC_CLK_TCK")
+        names = os.listdir("/proc")
     except (OSError, ValueError, StopIteration):
         return None
-    if not any(b"gateway" in a for a in args):
-        return False
-    # Field 22 of /proc/<pid>/stat is the start time in clock ticks after boot.
-    ticks = float(stat.rsplit(")", 1)[1].split()[19])
-    started = boot + ticks / os.sysconf("SC_CLK_TCK")
-    return abs(started - started_at) < 600
+    uid = os.getuid()
+    found = {}  # pid -> (start, ppid)
+    for name in names:
+        if not name.isdigit():
+            continue
+        try:
+            if os.stat("/proc/" + name).st_uid != uid:
+                continue
+            with open("/proc/%s/cmdline" % name, "rb") as f:
+                args = f.read().split(b"\0")
+            if not any(args[i] == b"gateway" and args[i + 1] == b"run" for i in range(len(args) - 1)):
+                continue
+            with open("/proc/%s/stat" % name) as f:
+                fields = f.read().rsplit(")", 1)[1].split()
+            # After the command name: state, ppid, ...; field 22 overall is the start time.
+            found[int(name)] = (boot + float(fields[19]) / tick, int(fields[1]))
+        except (OSError, ValueError, IndexError):
+            continue
+    return {pid: start for pid, (start, ppid) in found.items() if ppid not in found}
 
 
 def now(db, ctx):
@@ -256,9 +282,13 @@ def tools(db, ctx):
 def warnings(db, ctx):
     """Things worth a look, each {level: warning|critical, text}."""
     out = []
-    gws = gateways(db, ctx) if db.has("gateway_heartbeats", "last_heartbeat") else []
-    if db.has("gateway_heartbeats", "last_heartbeat") and not any(g["alive"] for g in gws):
-        out.append({"level": "critical", "text": "No gateway heartbeat in the last %d s" % HEARTBEAT_STALE_S})
+    gws = gateways(db, ctx)
+    if (gws or db.has("gateway_heartbeats")) and not any(g["alive"] for g in gws):
+        if any(g.get("checked_process") for g in gws) or gateway_processes() is not None:
+            text = "The Hermes gateway isn't running (no gateway process found)"
+        else:
+            text = "No gateway heartbeat in the last %d min" % (HEARTBEAT_STALE_S // 60)
+        out.append({"level": "critical", "text": text})
 
     if db.has("delivery_obligations", "state", "updated_at"):
         # Never read the content column: it's the message text.

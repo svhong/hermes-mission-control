@@ -170,22 +170,50 @@ class LinkingTest(unittest.TestCase):
 
 
 class GatewayProcessTest(unittest.TestCase):
-    def test_process_check(self):
+    def spawn(self, *args):
         import subprocess
+        p = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)", *args])
+        self.addCleanup(lambda: (p.kill(), p.wait()))
+        return p
+
+    def test_finds_gateway_run_processes_only(self):
         import time
-        from tabs.overview import process_running
-        proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)", "gateway", "run"])
-        try:
-            time.sleep(0.3)
-            self.assertTrue(process_running(proc.pid, time.time()))
-            # Same pid but the row says it started long ago: a reused pid, not our gateway.
-            self.assertFalse(process_running(proc.pid, time.time() - 86400))
-            # A running process that isn't a gateway.
-            self.assertFalse(process_running(os.getpid(), time.time()))
-        finally:
-            proc.kill()
-            proc.wait()
-        self.assertFalse(process_running(proc.pid, time.time()))
+        from tabs.overview import gateway_processes
+        gw = self.spawn("gateway", "run")
+        other = self.spawn("gateway", "status")
+        time.sleep(0.3)
+        procs = gateway_processes()
+        self.assertIn(gw.pid, procs)
+        self.assertNotIn(other.pid, procs)
+        self.assertLess(abs(procs[gw.pid] - time.time()), 5)
+
+    def test_running_gateway_with_stale_heartbeat_is_up(self):
+        """Like hermes-box: idle gateway, last heartbeat hours ago, pid not matching."""
+        import time
+        from tabs import Context
+        from tabs.overview import gateways, warnings
+        gw = self.spawn("gateway", "run")
+        time.sleep(0.3)
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        path = os.path.join(tmp.name, "state.db")
+        conn = sqlite3.connect(path)
+        with open(fake_hermes.SCHEMA) as f:
+            conn.executescript(f.read())
+        now = time.time()
+        conn.execute("INSERT INTO gateway_heartbeats VALUES ('a', 999999, ?, ?, '', '')", (now - 50000, now - 14659))
+        conn.commit()
+        conn.close()
+        with HermesDB(path) as db:
+            rows = gateways(db, Context(now))
+            self.assertTrue(rows[0]["alive"])
+            self.assertEqual(rows[0]["pid"], gw.pid)
+            self.assertEqual(warnings(db, Context(now)), [])
+        gw.kill()
+        gw.wait()
+        with HermesDB(path) as db:
+            self.assertFalse(any(g["alive"] for g in gateways(db, Context(now))))
+            self.assertIn("isn't running", warnings(db, Context(now))[0]["text"])
 
 
 class HelpersTest(unittest.TestCase):
