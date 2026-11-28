@@ -78,7 +78,8 @@ button { font: inherit; color: inherit; }
 }
 /* Hermes stands on the header's bottom edge, next to the title. */
 .brand { display: flex; align-items: flex-end; gap: 14px; align-self: flex-end; }
-.brand img { display: block; height: 88px; width: auto; }
+/* Mirrored so Hermes faces the title. */
+.brand img { display: block; height: 88px; width: auto; transform: scaleX(-1); }
 .brand h1 { font-size: 26px; line-height: 1.15; letter-spacing: -0.01em; margin-bottom: 16px; }
 /* Line the status pills and buttons up with the title text. */
 .top { align-items: flex-end; }
